@@ -10,30 +10,31 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import nest_asyncio
 
 # ─── CONFIG ─────────────────────────────────────────────────────
-TOKEN         = os.getenv("TOKEN", "8199259072:AAFmFBve-8gCFB2lut4XRGf5KEnlbkc3OM8")
-CHECK_INTERVAL = 60  # seconds between checks
-SPONSORED_MSG = (
+# Get these from your Render (or environment), or replace with literal strings.
+TOKEN          = os.getenv("TOKEN", "8199259072:AAFmFBve-8gCFB2lut4XRGf5KEnlbkc3OM8")
+CHECK_INTERVAL = 60    # seconds between blockchain checks
+SPONSORED_MSG  = (
     "\n\n📢 *Sponsored*: Check out $MetaWhale – now live on Moonbags! "
     "Join the chat: https://t.me/MetaWhaleOfficial"
 )
 
-TRACK_FILE = "tracked_wallets.json"   # stores {wallet: user_id}
-STATE_FILE = "wallet_last_tx.json"    # stores {wallet: last_seen_digest}
+TRACK_FILE = "tracked_wallets.json"   # stores {"wallet": user_id}
+STATE_FILE = "wallet_last_tx.json"    # stores {"wallet": last_seen_digest}
 
 API_TX  = "https://api.suiscan.xyz/v1/accounts/{}/txns?limit=5"
 API_BAL = "https://api.suiscan.xyz/v1/accounts/{}/balances"
 # ─────────────────────────────────────────────────────────────────
 
 def load_json(path, default):
-    return json.load(open(path)) if os.path.exists(path) else default
+    return json.load(open(path, "r")) if os.path.exists(path) else default
 
 def save_json(path, data):
     with open(path, "w") as f:
         json.dump(data, f)
 
-# Load state
-tracked_wallets = load_json(TRACK_FILE, {})  # { wallet_address: user_id }
-last_seen       = load_json(STATE_FILE, {})  # { wallet_address: last_tx_digest }
+# Load stored state
+tracked_wallets = load_json(TRACK_FILE, {})   # { wallet_address: user_id }
+last_seen       = load_json(STATE_FILE, {})    # { wallet_address: last_tx_digest }
 
 # ─── TELEGRAM COMMANDS ────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -41,10 +42,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🐸 *Welcome to FOMO Frog Tracker!*\n\n"
         "🔥 Features:\n"
         "• 🐋 *Whale Wallet Tracker*\n"
-        "• 📦 *Multi‐Wallet Support*\n"
+        "• 📦 *Multi‑Wallet Support*\n"
         "• 📢 *Sponsored Alerts*\n\n"
         "👉 Use `/track <wallet>` to begin.\n"
-        "Use `/help` for more commands."
+        "Use `/listwallets` to see your tracked wallets.\n"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -87,8 +88,8 @@ def get_balance(wallet):
     if not r.ok:
         return "unknown"
     data = r.json()
-    sui   = next((b for b in data if b["type"]=="SUI"), {"balance":0})["balance"]
-    tokens = len([b for b in data if b["type"]!="SUI"])
+    sui = next((b for b in data if b["type"] == "SUI"), {"balance": 0})["balance"]
+    tokens = len([b for b in data if b["type"] != "SUI"])
     return f"{int(sui)/1e9:,.0f} SUI + {tokens} tokens"
 
 def shorten(addr, n=6):
@@ -102,21 +103,20 @@ async def monitor_wallets(bot: Bot):
                 txs = get_latest_txs(wallet)
                 if not txs:
                     continue
-                latest_digest = txs[0]["digest"]
-                if latest_digest == last_seen.get(wallet):
+                latest = txs[0]["digest"]
+                if latest == last_seen.get(wallet):
                     continue
-                # collect unseen txs
+                # collect any unseen txs
                 unseen = []
                 for tx in reversed(txs):
                     if tx["digest"] == last_seen.get(wallet):
                         break
                     unseen.append(tx)
-                # send alerts
                 for tx in unseen:
                     await send_alert(bot, user_id, wallet, tx)
-                last_seen[wallet] = latest_digest
+                last_seen[wallet] = latest
             except Exception as e:
-                print(f"[ERROR] {wallet}: {e}")
+                print(f"[ERROR] monitoring {wallet}: {e}")
         save_json(STATE_FILE, last_seen)
         await asyncio.sleep(CHECK_INTERVAL)
 
@@ -126,7 +126,7 @@ async def send_alert(bot: Bot, user_id, wallet, tx):
     timestamp = ts.strftime("%Y-%m-%d %H:%M:%S")
     token_addr = tx.get("object_id", "unknown")
     token_name = tx.get("symbol",    "unknown")
-    amount     = tx.get("amount",     "")
+    amount     = tx.get("amount",    "")
     balance    = get_balance(wallet)
 
     msg = (
@@ -146,15 +146,19 @@ async def send_alert(bot: Bot, user_id, wallet, tx):
 # ─── BOT BOOTSTRAP ────────────────────────────────────────────────
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start",    start))
-    app.add_handler(CommandHandler("track",    track_cmd))
-    app.add_handler(CommandHandler("untrack",  untrack_cmd))
+    app.add_handler(CommandHandler("start",      start))
+    app.add_handler(CommandHandler("track",      track_cmd))
+    app.add_handler(CommandHandler("untrack",    untrack_cmd))
     app.add_handler(CommandHandler("listwallets", list_cmd))
 
     bot = Bot(token=TOKEN)
+    # clear any existing webhook so polling won’t conflict
+    await bot.delete_webhook()
+
+    # start background monitor and polling
     asyncio.create_task(monitor_wallets(bot))
     await app.run_polling()
 
 if __name__ == "__main__":
-    nest_asyncio.apply()  # fix event-loop on Python 3.13
+    nest_asyncio.apply()  # fix event-loop issue on Python 3.13
     asyncio.get_event_loop().run_until_complete(main())
