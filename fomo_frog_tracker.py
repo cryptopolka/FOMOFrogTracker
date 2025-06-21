@@ -2,22 +2,23 @@
 
 import asyncio
 import requests
+import json
+import os
+import nest_asyncio
 from bs4 import BeautifulSoup
 from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import json
-import os
 
-# Replace with your bot token from BotFather
+# Replace with your actual bot token from BotFather
 TOKEN = "8199259072:AAFmFBve-8gCFB2lut4XRGf5KEnlbkc3OM8"
 
-# Replace with your Telegram user ID (123456789) or channel handle ("@your_channel_name")
+# Replace with your user ID or @channel_username (as a string)
 CHANNEL_ID = "@fomofrogz"
 
 TRACKED_WALLETS_FILE = "tracked_wallets.json"
 sent_tx_ids = set()
 
-# Load or initialize tracked wallets
+# Load tracked wallets from file (or initialize empty)
 if os.path.exists(TRACKED_WALLETS_FILE):
     with open(TRACKED_WALLETS_FILE, "r") as f:
         tracked_wallets = set(json.load(f))
@@ -28,7 +29,7 @@ def save_wallets():
     with open(TRACKED_WALLETS_FILE, "w") as f:
         json.dump(list(tracked_wallets), f)
 
-# Scraping Moonbags recent transactions (basic HTML scraping)
+# Scrape recent token launches from Moonbags.io bonding curve
 def get_moonbags_transactions():
     url = "https://moonbags.io/bondingcurve"
     response = requests.get(url)
@@ -40,7 +41,7 @@ def get_moonbags_transactions():
             name = card.find("h3").text.strip()
             link = card.find("a", href=True)["href"]
             tx_url = f"https://moonbags.io{link}"
-            wallet_address = link.split("/")[-1]  # crude wallet guess
+            wallet_address = link.split("/")[-1]  # rough wallet guess
             txs.append({"name": name, "link": tx_url, "wallet": wallet_address})
         except Exception:
             continue
@@ -49,7 +50,8 @@ def get_moonbags_transactions():
 # Telegram Commands
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🐸 Welcome to *FOMO Frog Tracker!*\n\nUse /track <wallet> to start tracking.",
+        "🐸 Welcome to *FOMO Frog Tracker!*
+Use /track <wallet> to start tracking.",
         parse_mode="Markdown"
     )
 
@@ -76,12 +78,14 @@ async def untrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def listwallets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if tracked_wallets:
-        msg = "📋 *Tracked Wallets:*\n" + "\n".join(f"- `{w}`" for w in tracked_wallets)
+        msg = "📋 *Tracked Wallets:*
+" + "
+".join(f"- `{w}`" for w in tracked_wallets)
         await update.message.reply_text(msg, parse_mode="Markdown")
     else:
         await update.message.reply_text("No wallets are being tracked currently.")
 
-# Background task that runs every 60 seconds
+# Background job that monitors wallets and sends alerts
 async def monitor_wallets(bot: Bot):
     global sent_tx_ids
     while True:
@@ -91,9 +95,12 @@ async def monitor_wallets(bot: Bot):
                 wallet = tx["wallet"].lower()
                 if wallet in tracked_wallets and tx["link"] not in sent_tx_ids:
                     msg = (
-                        f"🐋 *Tracked Wallet Activity!*\n"
-                        f"Wallet: `{wallet}`\n"
-                        f"Token: *{tx['name']}*\n"
+                        f"🐋 *Tracked Wallet Activity!*
+"
+                        f"Wallet: `{wallet}`
+"
+                        f"Token: *{tx['name']}*
+"
                         f"[Moonbags Link]({tx['link']})"
                     )
                     await bot.send_message(chat_id=CHANNEL_ID, text=msg, parse_mode="Markdown")
@@ -102,7 +109,7 @@ async def monitor_wallets(bot: Bot):
             print("Error checking Moonbags:", e)
         await asyncio.sleep(60)
 
-# Run bot
+# Bot runner
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -114,5 +121,7 @@ async def main():
     asyncio.create_task(monitor_wallets(bot))
     await app.run_polling()
 
+# For compatibility with Python 3.13 / Render
 if __name__ == "__main__":
-    asyncio.run(main())
+    nest_asyncio.apply()
+    asyncio.get_event_loop().run_until_complete(main())
