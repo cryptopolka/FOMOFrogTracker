@@ -10,7 +10,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import nest_asyncio
 
 # ─── CONFIG ─────────────────────────────────────────────────────
-TOKEN         = os.getenv("8199259072:AAFmFBve-8gCFB2lut4XRGf5KEnlbkc3OM8", "YOUR_TELEGRAM_BOT_TOKEN")
+TOKEN         = os.getenv("TOKEN", "8199259072:AAFmFBve-8gCFB2lut4XRGf5KEnlbkc3OM8")
 CHECK_INTERVAL = 60  # seconds between checks
 SPONSORED_MSG = (
     "\n\n📢 *Sponsored*: Check out $MetaWhale – now live on Moonbags! "
