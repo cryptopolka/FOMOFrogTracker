@@ -10,7 +10,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ─── CONFIG ─────────────────────────────────────────────────────
-TOKEN          = os.getenv("TOKEN", "8199259072:AAFmFBve-8gCFB2lut4XRGf5KEnlbkc3OM8")
+TOKEN          = os.getenv("TOKEN", "8199259072:AAGqpEGdKGVfhO5UwhuJ9oFgM5FKVY2nUVw")
 CHECK_INTERVAL = 60    # seconds between checks
 SPONSORED_MSG  = (
     "\n\n📢 *Sponsored*: Check out $MetaWhale – now live on Moonbags! "
