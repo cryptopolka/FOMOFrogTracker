@@ -12,7 +12,7 @@ import os
 TOKEN = "8199259072:AAFmFBve-8gCFB2lut4XRGf5KEnlbkc3OM8"
 
 # Replace with your Telegram user ID (123456789) or channel handle ("@your_channel_name")
-CHANNEL_ID = fomofrogz
+CHANNEL_ID = @fomofrogz
 
 TRACKED_WALLETS_FILE = "tracked_wallets.json"
 sent_tx_ids = set()
