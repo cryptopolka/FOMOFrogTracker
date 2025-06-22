@@ -14,7 +14,7 @@ from telegram.ext import (
 
 # ─── CONFIG ─────────────────────────────────────────────────────
 TOKEN          = os.getenv("TOKEN", "8199259072:AAHfLDID2q6QGs43LnmF6FsixhdyNOR9pEQ")
-CHECK_INTERVAL = 60  # in seconds
+CHECK_INTERVAL = 60  # seconds between checks
 SPONSORED_MSG  = (
     "\n\n📢 *Sponsored*: Check out $MetaWhale – now live on Moonbags! "
     "Join the chat: https://t.me/MetaWhaleOfficial"
@@ -122,12 +122,12 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
         for tx in unseen:
             logging.info(f" → alert for {tx['digest']}")
             action    = tx.get("action", "TX").upper()
-            ts        = datetime.datetime.fromtimestamp(tx["timestamp_ms"]/1000)
+            ts        = datetime.datetime.fromtimestamp(tx["timestamp_ms"] / 1000)
             timestamp = ts.strftime("%Y-%m-%d %H:%M:%S")
-            token_addr= tx.get("object_id", "unknown")
-            token_name= tx.get("symbol",    "unknown")
-            amount    = tx.get("amount",    "")
-            balance   = get_balance(wallet)
+            token_addr = tx.get("object_id", "unknown")
+            token_name = tx.get("symbol",    "unknown")
+            amount     = tx.get("amount",    "")
+            balance    = get_balance(wallet)
 
             msg = (
                 f"🐋 *Wallet Activity Alert!*\n"
@@ -149,35 +149,31 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
 # ─── ENTRY POINT ─────────────────────────────────────────────────
 def main():
-    # 1) clear webhook & pending updates
+    # Clear webhook & pending updates
     requests.post(
         f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true"
     )
 
-    # 2) logging
+    # Logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
     )
 
-    # 3) build & register handlers
-    app = (
-        ApplicationBuilder()
-        .token(TOKEN)
-        .build()
-    )
+    # Build application
+    app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("track", track_cmd))
     app.add_handler(CommandHandler("untrack", untrack_cmd))
     app.add_handler(CommandHandler("listwallets", list_cmd))
 
-    # 4) schedule the wallet monitor job
+    # Schedule monitor_job every CHECK_INTERVAL seconds
     app.job_queue.run_repeating(
         monitor_job,
         interval=CHECK_INTERVAL,
-        first=10  # wait 10s before first run
+        first=10
     )
 
-    # 5) start polling (blocks here)
+    # Start polling (blocks here)
     app.run_polling()
 
 if __name__ == "__main__":
