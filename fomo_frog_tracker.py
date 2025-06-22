@@ -13,7 +13,7 @@ from telegram.ext import (
 )
 
 # ─── CONFIG ─────────────────────────────────────────────────────
-TOKEN          = os.getenv("TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+TOKEN          = os.getenv("TOKEN", "8199259072:AAHfLDID2q6QGs43LnmF6FsixhdyNOR9pEQ")
 CHECK_INTERVAL = 60  # in seconds
 SPONSORED_MSG  = (
     "\n\n📢 *Sponsored*: Check out $MetaWhale – now live on Moonbags! "
