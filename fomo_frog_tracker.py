@@ -2,7 +2,6 @@ import os
 import time
 import requests
 import numpy as np
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram.ext import ApplicationBuilder, CommandHandler
 
 # ── CONFIG ──────────────────────────────────────────────────
@@ -36,17 +35,13 @@ def is_price_change_reasonable(pair, max_change_pct=100):
     except:
         return False
 
-# Placeholder for additional security checks
-# def is_holder_distribution_ok(pair): pass
-# def is_social_audit_valid(pair): pass
-
+# Combined legitimacy check
+# Placeholder for additional checks (holder distribution, audits)
 def is_legit(pair):
     return (
         is_liquidity_sufficient(pair)
         and is_token_old_enough(pair)
         and is_price_change_reasonable(pair)
-        # and is_holder_distribution_ok(pair)
-        # and is_social_audit_valid(pair)
     )
 
 # ── RSI CALCULATION ─────────────────────────────────────────
@@ -60,7 +55,7 @@ def compute_rsi(prices, period):
     return 100 - (100 / (1 + rs))
 
 # ── BOT COMMANDS ───────────────────────────────────────────
-async def start(update, ctx):
+async def start(update, context):
     chat_id = update.effective_chat.id
     RECIPIENTS.add(chat_id)
     await update.message.reply_text(
@@ -70,19 +65,22 @@ async def start(update, ctx):
         parse_mode="Markdown"
     )
 
-async def help_cmd(update, ctx):
+async def help_cmd(update, context):
     await update.message.reply_text(
         "Commands:\n"
         "/start  – Register this chat for RSI alerts\n"
         "/help   – Show this help message\n"
-        "Bot auto-scans top tokens every 30 min with security filters."
+        "The bot auto-scans top tokens every 30 min with security filters."
     )
 
 # ── SCAN JOB ─────────────────────────────────────────────────
-async def scan_all(app, _):
-    # Prepare list
+async def scan_job(context):
     entries = []
-    data = requests.get("https://api.dexscreener.com/latest/dex/pairs/sui").json().get("pairs", [])
+    try:
+        data = requests.get("https://api.dexscreener.com/latest/dex/pairs/sui").json().get("pairs", [])
+    except:
+        return
+
     for pair in data:
         if not is_legit(pair):
             continue
@@ -97,12 +95,12 @@ async def scan_all(app, _):
             'liquidity': float(pair.get('liquidity', {}).get('usd', 0)),
             'rsi': rsi
         })
-    # Sort entries by RSI
+
+    # sort and slice
     sorted_by_rsi = sorted(entries, key=lambda x: x['rsi'])
     oversold_list = sorted_by_rsi[:5]
     overbought_list = sorted_by_rsi[-5:][::-1]
 
-    # Build report
     report = "🐸 *FOMO Frog Tracker — RSI Scan Results* (every 30 min)\n\n"
     if overbought_list:
         report += "⚠️ *Top 5 Overbought:*\n"
@@ -116,16 +114,16 @@ async def scan_all(app, _):
         report += "\n"
     report += "_Note: FOMO Frog Tracker is for alerts only. DYOR—any trades are at your own risk._"
 
-    # Broadcast to all recipients
     for chat_id in RECIPIENTS:
-        await app.bot.send_message(chat_id, report, parse_mode="Markdown")
+        await context.bot.send_message(chat_id, report, parse_mode="Markdown")
 
 # ── MAIN ENTRYPOINT ─────────────────────────────────────────
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELE_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(lambda: scan_all(app, None), "interval", minutes=30)
-    scheduler.start()
+
+    # Schedule the scan every 30 minutes, first run after 1 minute
+    app.job_queue.run_repeating(scan_job, interval=1800, first=60)
+
     app.run_polling()
