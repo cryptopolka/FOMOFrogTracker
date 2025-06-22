@@ -1,4 +1,2 @@
-python-telegram-bot==20.3
-beautifulsoup4
+python-telegram-bot[job-queue]==20.3
 requests
-nest_asyncio
