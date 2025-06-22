@@ -24,12 +24,12 @@ from telegram.ext import (
 )
 
 # ─── CONFIG ──────────────────────────────────────────────────────
-TOKEN               = os.getenv("TOKEN")  # your Telegram bot token
-WEBHOOK_URL         = os.getenv("WEBHOOK_URL")  # e.g. https://fomo-frog-tracker.onrender.com
+TOKEN               = os.getenv("TOKEN")                # your Telegram bot token
+WEBHOOK_URL         = os.getenv("WEBHOOK_URL")          # e.g. https://fomo-frog-tracker.onrender.com
 PORT                = int(os.getenv("PORT", "80"))
-CHECK_INTERVAL      = 60  # seconds
+CHECK_INTERVAL      = 60                                # seconds
 
-# Your BlockVision (SuiVision) API key, hard‑coded as provided
+# Your BlockVision API key
 BLOCKVISION_API_KEY = "2yrKC52obCEwlOti0AVSr1RMCcF"
 
 SPONSORED_MSG = (
@@ -40,10 +40,11 @@ SPONSORED_MSG = (
 TRACK_FILE  = "tracked_wallets.json"
 STATE_FILE  = "wallet_last_tx.json"
 
-# Base URL for your SuiVision v1 HTTP endpoints
-BV_BASE = f"https://sui-mainnet.blockvision.org/v1/{BLOCKVISION_API_KEY}"
-# JSON‑RPC fallback endpoint
-RPC_URL = "https://fullnode.mainnet.sui.io:443"
+# BlockVision v2 endpoints
+BV_TX_URL   = "https://api.blockvision.org/v2/sui/account/activities"
+BV_COINS_URL= "https://api.blockvision.org/v2/sui/account/coins"
+# Fallback JSON‑RPC
+RPC_URL      = "https://fullnode.mainnet.sui.io:443"
 # ──────────────────────────────────────────────────────────────────
 
 # ─── State persistence ────────────────────────────────────────────
@@ -57,7 +58,7 @@ def save_json(path, data):
 tracked_wallets = load_json(TRACK_FILE, {})  # wallet → chat_id
 last_seen       = load_json(STATE_FILE, {})  # wallet → last_digest
 
-# ─── Telegram command handlers ────────────────────────────────────
+# ─── Telegram handlers ────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🐸 *Welcome to FOMO Frog Tracker!*\n\n"
@@ -96,12 +97,12 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = "\n".join(f"- `{w}`" for w in my)
     await update.message.reply_text(f"📋 *Your wallets:*\n{lines}", parse_mode="Markdown")
 
-# ─── On‑chain helpers w/ HTTP→RPC fallback ────────────────────────
+# ─── On‑chain helpers w/ BlockVision v2 → RPC fallback ────────────
 def get_latest_txs(wallet):
-    # 1) Try SuiVision v1 HTTP
+    headers = {"accept": "application/json", "X-API-Key": BLOCKVISION_API_KEY}
+    # 1) Try BlockVision v2
     try:
-        url = f"{BV_BASE}/account/activities"
-        r   = requests.get(url, params={"address": wallet, "limit": 5}, timeout=10)
+        r = requests.get(BV_TX_URL, headers=headers, params={"address": wallet, "limit": 5}, timeout=10)
         r.raise_for_status()
         data = r.json().get("data", [])
         if data:
@@ -114,11 +115,11 @@ def get_latest_txs(wallet):
                 "amount":       (it.get("coinChanges") or [{}])[0].get("amount", ""),
             } for it in data]
     except Exception as e:
-        logging.warning(f"BlockVision HTTP failed for {wallet}: {e}")
+        logging.warning(f"BlockVision v2 HTTP failed for {wallet}: {e}")
 
-    # 2) Fallback to JSON‑RPC (only digests)
+    # 2) Fallback JSON‑RPC digests
     try:
-        payload = {"jsonrpc": "2.0", "id": 1, "method": "sui_getTransactions", "params": [wallet, 5]}
+        payload = {"jsonrpc":"2.0","id":1,"method":"sui_getTransactions","params":[wallet,5]}
         rpc     = requests.post(RPC_URL, json=payload, timeout=10)
         rpc.raise_for_status()
         digs    = rpc.json().get("result", [])
@@ -136,24 +137,23 @@ def get_latest_txs(wallet):
         return []
 
 def get_balance(wallet):
-    # 1) Try SuiVision v1 HTTP coins endpoint
+    headers = {"accept": "application/json", "X-API-Key": BLOCKVISION_API_KEY}
+    # 1) BlockVision v2 coins
     try:
-        url   = f"{BV_BASE}/account/coins"
-        r     = requests.get(url, params={"account": wallet}, timeout=10)
+        r = requests.get(BV_COINS_URL, headers=headers, params={"account": wallet}, timeout=10)
         r.raise_for_status()
         coins = r.json().get("data", [])
-        sui = next((c.get("balance", 0) for c in coins if c.get("symbol") == "SUI"), 0)
+        sui = next((c.get("balance",0) for c in coins if c.get("symbol")=="SUI"), 0)
         return f"{int(sui)/1e9:,.0f} SUI + {len(coins)-1} tokens"
     except Exception:
         pass
-
-    # 2) Fallback to JSON‑RPC suix_getAllBalances
+    # 2) JSON‑RPC suix_getAllBalances
     try:
         payload = {"jsonrpc":"2.0","id":1,"method":"suix_getAllBalances","params":[wallet]}
         rpc     = requests.post(RPC_URL, json=payload, timeout=10)
         rpc.raise_for_status()
         bal_list = rpc.json().get("result", [])
-        sui = 0
+        sui=0
         for b in bal_list:
             if b.get("coinType","").endswith("::sui::SUI"):
                 sui = int(b.get("totalBalance",0))
@@ -169,20 +169,16 @@ def shorten(addr, n=6):
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     global last_seen
     bot = context.bot
-
     for wallet, chat_id in list(tracked_wallets.items()):
         logging.info(f"Checking {wallet}, last_seen={last_seen.get(wallet)}")
         txs = get_latest_txs(wallet)
         if not txs:
             continue
-
         latest = txs[0]["digest"]
         if latest == last_seen.get(wallet):
             continue
-
         unseen = [tx for tx in reversed(txs) if tx["digest"] != last_seen.get(wallet)]
         logging.info(f" → {len(unseen)} new tx(s) for {wallet}")
-
         for tx in unseen:
             ts   = datetime.datetime.fromtimestamp(tx["timestamp_ms"]/1000)
             when = ts.strftime("%Y-%m-%d %H:%M:%S")
@@ -198,22 +194,16 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
                 f"{SPONSORED_MSG}"
             )
             await bot.send_message(chat_id, msg, parse_mode="Markdown")
-
         last_seen[wallet] = latest
-
     save_json(STATE_FILE, last_seen)
 
 # ─── ENTRY POINT ─────────────────────────────────────────────────
 def main():
-    # Clear old webhook + pending updates
-    requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true"
-    )
-    # Set new webhook endpoint
+    # clear old webhook + pending updates
+    requests.post(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true")
+    # set new webhook
     endpoint = f"{WEBHOOK_URL}/{TOKEN}"
-    requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/setWebhook?url={endpoint}"
-    )
+    requests.post(f"https://api.telegram.org/bot{TOKEN}/setWebhook?url={endpoint}")
 
     logging.basicConfig(format="%(asctime)s %(levelname)s:%(message)s", level=logging.INFO)
 
@@ -221,7 +211,7 @@ def main():
     app.add_handler(CommandHandler("start",      start))
     app.add_handler(CommandHandler("track",      track_cmd))
     app.add_handler(CommandHandler("untrack",    untrack_cmd))
-    app.add_handler(CommandHandler("listwallets", list_cmd))
+    app.add_handler(CommandHandler("listwallets",list_cmd))
 
     app.job_queue.run_repeating(monitor_job, interval=CHECK_INTERVAL, first=10)
 
