@@ -94,12 +94,17 @@ def get_balance(wallet):
 def shorten(addr, n=6):
     return addr[:n] + "…" + addr[-n:]
 
+# ─── MONITOR WITH DEBUG LOGS ─────────────────────────────────────
 async def monitor_wallets(bot):
     global last_seen
     while True:
         for wallet, user_id in list(tracked_wallets.items()):
+            # DEBUG: indicate we are checking this wallet
+            print(f"🔍 Checking wallet {wallet}, last_seen={last_seen.get(wallet)}")
             try:
                 txs = get_latest_txs(wallet)
+                # DEBUG: show number of fetched transactions
+                print(f"   → fetched {len(txs)} txs for {wallet}")
                 if not txs:
                     continue
                 latest = txs[0]["digest"]
@@ -111,6 +116,8 @@ async def monitor_wallets(bot):
                         break
                     unseen.append(tx)
                 for tx in unseen:
+                    # DEBUG: indicate we're about to send an alert
+                    print(f"   → sending alert for digest {tx['digest']}")
                     await send_alert(bot, user_id, wallet, tx)
                 last_seen[wallet] = latest
             except Exception as e:
@@ -143,24 +150,22 @@ async def send_alert(bot, user_id, wallet, tx):
 
 # ─── BOT BOOTSTRAP ────────────────────────────────────────────────
 async def main():
-    # Build the Telegram Application
+    nest_asyncio.apply()  # fix event loop on Python 3.13
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Register your command handlers
     app.add_handler(CommandHandler("start",       start))
     app.add_handler(CommandHandler("track",       track_cmd))
     app.add_handler(CommandHandler("untrack",     untrack_cmd))
     app.add_handler(CommandHandler("listwallets", list_cmd))
 
-    # Clear any webhook on this bot instance to avoid conflicts
+    # Clear any existing webhook before polling
     await app.bot.delete_webhook()
 
-    # Start the background wallet monitor
+    # Start background monitoring
     asyncio.create_task(monitor_wallets(app.bot))
 
-    # Start polling (no extra args)
+    # Begin polling
     await app.run_polling()
 
 if __name__ == "__main__":
-    nest_asyncio.apply()
     asyncio.get_event_loop().run_until_complete(main())
