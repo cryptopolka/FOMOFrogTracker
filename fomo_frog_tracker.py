@@ -1,5 +1,3 @@
-# fomo_frog_tracker.py
-
 import os
 import json
 import datetime
@@ -14,7 +12,7 @@ WEBHOOK_URL     = os.getenv("WEBHOOK_URL")           # e.g. https://<your-servic
 PORT            = int(os.getenv("PORT", "80"))
 CHECK_INTERVAL  = 60                                  # seconds between checks
 
-RAIDENX_KEY     = os.getenv("RAIDENX_KEY")           # your API key
+RAIDENX_KEY     = os.getenv("RAIDENX_KEY", "raidenX-989c7b0f-49e2-4b27-a050-be6b14a73a72")
 RAIDENX_NETWORK = os.getenv("RAIDENX_NETWORK", "sui")# network identifier
 API_BASE        = "https://api-public.raidenx.io"
 API_TX_URL      = f"{API_BASE}/{RAIDENX_NETWORK}/v1/wallet/tx_list"
@@ -33,8 +31,10 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 # ─── PATCH JobQueue weakref bug ────────────────────────────────────
 import telegram.ext._jobqueue as _jq
+
 def _patch_set_app(self, application):
     self._application = lambda: application
+
 _jq.JobQueue.set_application = _patch_set_app
 
 # ─── PERSISTENCE ────────────────────────────────────────────────────
@@ -89,15 +89,21 @@ async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ─── RAIDENX FETCHER ───────────────────────────────────────────────
 def get_latest_txs(wallet):
+    # strip 0x prefix for RaidenX
+    addr = wallet.lower().removeprefix("0x")
     headers = {
-        "accept": "application/json",
+        "accept":    "application/json",
         "X-API-Key": RAIDENX_KEY
     }
-    params = {"address": wallet, "limit": 5}
+    params = {"address": addr, "limit": 5}
     try:
         resp = requests.get(API_TX_URL, headers=headers, params=params, timeout=10)
+        logging.info(f"GET {resp.url}")
         resp.raise_for_status()
         data = resp.json().get("data", [])
+    except requests.HTTPError:
+        logging.warning(f"RaidenX 4xx/5xx for {wallet}: {resp.status_code} {resp.text}")
+        return []
     except Exception as e:
         logging.warning(f"RaidenX API error for {wallet}: {e}")
         return []
@@ -110,11 +116,11 @@ def get_latest_txs(wallet):
     for it in data:
         txs.append({
             "digest":       it.get("txHash", ""),
-            "action":       it.get("type", ""),
+            "action":       it.get("type",     ""),
             "timestamp_ms": it.get("timestamp", 0),
             "symbol":       it.get("tokenSymbol", ""),
-            "amount":       it.get("amount", ""),
-            "pair":         it.get("pair", "")
+            "amount":       it.get("amount",       ""),
+            "pair":         it.get("pair",         "")
         })
     return txs
 
