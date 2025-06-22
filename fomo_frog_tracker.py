@@ -1,183 +1,97 @@
 import os
-import json
-import datetime
-import logging
 import requests
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import numpy as np
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from telegram.ext import ApplicationBuilder, CommandHandler
 
-# ─── CONFIG ───────────────────────────────────────────────────────
-TOKEN           = os.getenv("TOKEN")                 # Telegram bot token
-WEBHOOK_URL     = os.getenv("WEBHOOK_URL")           # e.g. https://<your-service>.onrender.com
-PORT            = int(os.getenv("PORT", "80"))
-CHECK_INTERVAL  = 60                                  # seconds between checks
+# ── CONFIG ──────────────────────────────────────────────────
+TELE_TOKEN = os.getenv("TELE_TOKEN")
+CHAT_ID    = os.getenv("CHAT_ID")
+RSI_PERIOD = int(os.getenv("RSI_PERIOD", 14))
+OVERBOT    = int(os.getenv("RSI_OVERBOUGHT", 70))
+OVERSOLD   = int(os.getenv("RSI_OVERSOLD", 30))
+PAIR_IDS   = os.getenv("PAIR_IDS", "").split(",")
 
-RAIDENX_KEY     = os.getenv("RAIDENX_KEY", "raidenX-989c7b0f-49e2-4b27-a050-be6b14a73a72")
-RAIDENX_NETWORK = os.getenv("RAIDENX_NETWORK", "sui")# network identifier
-API_BASE        = "https://api-public.raidenx.io"
-API_TX_URL      = f"{API_BASE}/{RAIDENX_NETWORK}/v1/wallet/tx_list"
+# ── OPTIONAL LEGIT CHECK STUB ───────────────────────────────
+def is_legit(pair_id):
+    # TODO: implement your liquidity‑lock, age, holder, volume, audit checks
+    return True
 
-SPONSORED_MSG = (
-    "\n\n📢 *Sponsored*: Check out $MetaWhale – now live on Moonbags! "
-    "Join the chat: https://t.me/MetaWhaleOfficial"
-)
+# ── RSI CALC ─────────────────────────────────────────────────
+def compute_rsi(prices, period):
+    deltas   = np.diff(prices)
+    gains    = np.where(deltas > 0, deltas, 0)
+    losses   = np.where(deltas < 0, -deltas, 0)
+    avg_gain = np.convolve(gains,  np.ones(period)/period, mode='valid')
+    avg_loss = np.convolve(losses, np.ones(period)/period, mode='valid')
+    rs       = avg_gain / (avg_loss + 1e-8)
+    return 100 - (100 / (1 + rs))
 
-TRACK_FILE  = "tracked_wallets.json"
-STATE_FILE  = "wallet_last_tx.json"
-
-# ─── SETUP LOGGING ─────────────────────────────────────────────────
-logging.basicConfig(format="%(asctime)s %(levelname)s:%(message)s", level=logging.INFO)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-
-# ─── PATCH JobQueue weakref bug ────────────────────────────────────
-import telegram.ext._jobqueue as _jq
-
-def _patch_set_app(self, application):
-    self._application = lambda: application
-
-_jq.JobQueue.set_application = _patch_set_app
-
-# ─── PERSISTENCE ────────────────────────────────────────────────────
-def load_json(path, default):
-    return json.load(open(path)) if os.path.exists(path) else default
-
-def save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f)
-
-tracked_wallets = load_json(TRACK_FILE, {})
-last_seen       = load_json(STATE_FILE, {})
-
-# ─── TELEGRAM COMMANDS ──────────────────────────────────────────────
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+# ── /start COMMAND ──────────────────────────────────────────
+async def start(update, ctx):
     await update.message.reply_text(
-        "🐸 *Welcome to FOMO Frog Tracker (RaidenX‑Sui edition)!*\n\n"
-        "• /track `<wallet>`\n"
-        "• /untrack `<wallet>`\n"
-        "• /listwallets\n\n"
-        "Alerts fire on any new RaidenX txs for your tracked wallets.",
+        "🐸 Welcome to *FOMO Frog Tracker*!  I scan your Sui tokens every 30 min\n"
+        "/help for commands.",
         parse_mode="Markdown"
     )
 
-async def track_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args:
-        return await update.message.reply_text("Usage: /track <wallet_address>")
-    w = ctx.args[0].lower()
-    tracked_wallets[w] = update.effective_chat.id
-    save_json(TRACK_FILE, tracked_wallets)
-    await update.message.reply_text(f"✅ Now tracking `{w}`", parse_mode="Markdown")
+# ── /help COMMAND ───────────────────────────────────────────
+async def help_cmd(update, ctx):
+    await update.message.reply_text(
+        "/start  – show welcome message\n"
+        "/help   – this menu\n"
+        "Bot scans automatically every 30 min; no other commands needed."
+    )
 
-async def untrack_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args:
-        return await update.message.reply_text("Usage: /untrack <wallet_address>")
-    w   = ctx.args[0].lower()
-    uid = update.effective_chat.id
-    if tracked_wallets.get(w) == uid:
-        tracked_wallets.pop(w)
-        save_json(TRACK_FILE, tracked_wallets)
-        await update.message.reply_text(f"❌ Untracked `{w}`", parse_mode="Markdown")
-    else:
-        await update.message.reply_text("That wallet isn’t in your list.")
+# ── SCAN JOB ─────────────────────────────────────────────────
+async def scan_all(app, _):
+    overbought, oversold = [], []
 
-async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_chat.id
-    my  = [w for w,u in tracked_wallets.items() if u == uid]
-    if not my:
-        return await update.message.reply_text("No wallets being tracked.")
-    msg = "📋 *Your wallets:*\n" + "\n".join(f"- `{w}`" for w in my)
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-# ─── RAIDENX FETCHER ───────────────────────────────────────────────
-def get_latest_txs(wallet):
-    # strip 0x prefix for RaidenX
-    addr = wallet.lower().removeprefix("0x")
-    headers = {
-        "accept":    "application/json",
-        "X-API-Key": RAIDENX_KEY
-    }
-    params = {"address": addr, "limit": 5}
-    try:
-        resp = requests.get(API_TX_URL, headers=headers, params=params, timeout=10)
-        logging.info(f"GET {resp.url}")
-        resp.raise_for_status()
-        data = resp.json().get("data", [])
-    except requests.HTTPError:
-        logging.warning(f"RaidenX 4xx/5xx for {wallet}: {resp.status_code} {resp.text}")
-        return []
-    except Exception as e:
-        logging.warning(f"RaidenX API error for {wallet}: {e}")
-        return []
-
-    if not data:
-        logging.info(f"RaidenX returned no txs for {wallet}")
-        return []
-
-    txs = []
-    for it in data:
-        txs.append({
-            "digest":       it.get("txHash", ""),
-            "action":       it.get("type",     ""),
-            "timestamp_ms": it.get("timestamp", 0),
-            "symbol":       it.get("tokenSymbol", ""),
-            "amount":       it.get("amount",       ""),
-            "pair":         it.get("pair",         "")
-        })
-    return txs
-
-def shorten(addr, n=6):
-    return addr[:n] + "…" + addr[-n:]
-
-# ─── MONITOR JOB ────────────────────────────────────────────────────
-async def monitor_job(ctx: ContextTypes.DEFAULT_TYPE):
-    global last_seen
-    bot = ctx.bot
-
-    for wallet, chat_id in list(tracked_wallets.items()):
-        logging.info(f"Checking {wallet}, last_seen={last_seen.get(wallet)}")
-        txs = get_latest_txs(wallet)
-        if not txs:
+    for pid in PAIR_IDS:
+        try:
+            resp       = requests.get(
+                f"https://api.dexscreener.com/latest/dex/pairs/sui/{pid}"
+            ).json()["pairs"][0]
+            symbol     = resp["symbol"]
+            dex        = resp["dexId"]
+            liquidity  = float(resp["liquidity"]["usd"])
+            closes     = np.array([pt[1] for pt in resp["chart"]])
+            rsi_value  = compute_rsi(closes, RSI_PERIOD)[-1]
+        except Exception:
             continue
 
-        newest = txs[0]["digest"]
-        if newest == last_seen.get(wallet):
+        if not is_legit(pid):
             continue
 
-        unseen = [tx for tx in reversed(txs) if tx["digest"] != last_seen.get(wallet)]
-        logging.info(f" → {len(unseen)} new tx(s) for {wallet}")
+        label = (
+            f"{symbol} on *{dex}* (Liquidity: ${liquidity:,.0f}) — RSI {rsi_value:.1f}"
+        )
+        if rsi_value > OVERBOT:
+            overbought.append(label)
+        elif rsi_value < OVERSOLD:
+            oversold.append(label)
 
-        for tx in unseen:
-            ts   = datetime.datetime.fromtimestamp(tx["timestamp_ms"]/1000)
-            when = ts.strftime("%Y-%m-%d %H:%M:%S")
-            msg  = (
-                f"🐋 *RaidenX Tx Alert!*\n"
-                f"`{shorten(wallet)}` • *{tx['action'].upper()}*\n"
-                f"{tx['symbol']} • {tx['amount']}\n"
-                f"Pair: `{tx['pair']}`\n"
-                f"Time: {when}\n"
-                f"Tx: https://raidenx.io/tx/{tx['digest']}"
-                f"{SPONSORED_MSG}"
-            )
-            await bot.send_message(chat_id, msg, parse_mode="Markdown")
+    report  = "🐸 *FOMO Frog Tracker — RSI Scan Results* (every 30 min)\n\n"
+    if overbought:
+        report += "⚠️ *Overbought:*\n" + "\n".join(overbought) + "\n\n"
+    if oversold:
+        report += "✅ *Oversold:*\n"   + "\n".join(oversold) + "\n\n"
+    report += (
+        "_Note: FOMO Frog Tracker is for alerts only. DYOR—any trades are at your own risk._"
+    )
 
-        last_seen[wallet] = newest
+    await app.bot.send_message(CHAT_ID, report, parse_mode="Markdown")
 
-    save_json(STATE_FILE, last_seen)
-
-# ─── ENTRY POINT ───────────────────────────────────────────────────
-def main():
-    # Clear old webhook & pending updates
-    requests.post(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true")
-    endpoint = f"{WEBHOOK_URL}/{TOKEN}"
-    requests.post(f"https://api.telegram.org/bot{TOKEN}/setWebhook?url={endpoint}")
-
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start",       start))
-    app.add_handler(CommandHandler("track",       track_cmd))
-    app.add_handler(CommandHandler("untrack",     untrack_cmd))
-    app.add_handler(CommandHandler("listwallets", list_cmd))
-
-    app.job_queue.run_repeating(monitor_job, interval=CHECK_INTERVAL, first=10)
-    app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=endpoint)
-
+# ── MAIN ENTRYPOINT ─────────────────────────────────────────
 if __name__ == "__main__":
-    main()
+    app = ApplicationBuilder().token(TELE_TOKEN).build()
+    # register commands
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help",  help_cmd))
+
+    # schedule the 30‑min scanner
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(lambda: scan_all(app, None), "interval", minutes=30)
+    scheduler.start()
+
+    app.run_polling()
