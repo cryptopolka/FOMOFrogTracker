@@ -21,7 +21,7 @@ def _patch_set_application(self, application):
 JobQueue.set_application = _patch_set_application
 # ────────────────────────────────────────────────────────────────────
 
-# ─── 2) Config ─────────────────────────────────────────────────────
+# ─── 2) Configuration ──────────────────────────────────────────────
 TOKEN          = os.getenv("TOKEN", "8199259072:AAHfLDID2q6QGs43LnmF6FsixhdyNOR9pEQ")
 CHECK_INTERVAL = 60  # seconds between checks
 SPONSORED_MSG  = (
@@ -106,19 +106,22 @@ def get_balance(wallet):
 def shorten(addr, n=6):
     return addr[:n] + "…" + addr[-n:]
 
-# ─── 6) Monitor job ─────────────────────────────────────────────────
+# ─── 6) Monitor job with debug logs ────────────────────────────────
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     global last_seen
     bot = context.bot
+
     for wallet, uid in list(tracked_wallets.items()):
-        logging.info(f"Checking {wallet}, last_seen={last_seen.get(wallet)}")
+        logging.info(f"🔍 Checking wallet {wallet}, last_seen={last_seen.get(wallet)}")
         txs = get_latest_txs(wallet)
-        logging.info(f" → fetched {len(txs)} txs")
+        logging.info(f"   → fetched {len(txs)} txs: {[tx['digest'] for tx in txs]}")
         if not txs:
             continue
 
         latest = txs[0]["digest"]
+        logging.info(f"   → latest digest is {latest}")
         if latest == last_seen.get(wallet):
+            logging.info("   → no new transactions")
             continue
 
         unseen = []
@@ -126,8 +129,10 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
             if tx["digest"] == last_seen.get(wallet):
                 break
             unseen.append(tx)
+        logging.info(f"   → {len(unseen)} unseen tx(s)")
 
         for tx in unseen:
+            logging.info(f"   → sending alert for digest {tx['digest']}")
             action    = tx.get("action","TX").upper()
             ts        = datetime.datetime.fromtimestamp(tx["timestamp_ms"]/1000)
             timestamp = ts.strftime("%Y-%m-%d %H:%M:%S")
@@ -156,27 +161,33 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
 # ─── 7) Entry point ────────────────────────────────────────────────
 def main():
-    # clear webhook & pending updates
-    requests.post(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true")
+    # Clear webhook & pending updates
+    requests.post(
+        f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true"
+    )
 
-    # logging
+    # Basic logging
     logging.basicConfig(
         format="%(asctime)s %(levelname)s:%(message)s", level=logging.INFO
     )
 
-    # build application
+    # Build application
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # register handlers
+    # Register command handlers
     app.add_handler(CommandHandler("start",      start))
     app.add_handler(CommandHandler("track",      track_cmd))
     app.add_handler(CommandHandler("untrack",    untrack_cmd))
     app.add_handler(CommandHandler("listwallets", list_cmd))
 
-    # schedule monitor job
-    app.job_queue.run_repeating(monitor_job, interval=CHECK_INTERVAL, first=10)
+    # Schedule monitor_job every CHECK_INTERVAL seconds
+    app.job_queue.run_repeating(
+        monitor_job,
+        interval=CHECK_INTERVAL,
+        first=10
+    )
 
-    # start polling (blocks)
+    # Start polling (this call blocks)
     app.run_polling()
 
 if __name__ == "__main__":
