@@ -8,9 +8,17 @@ import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+# ─── MONKEY‐PATCH for JobQueue weakref bug in PTB 20.3 ────────────
+from telegram.ext._jobqueue import JobQueue
+def _qp_set_application(self, application):
+    # Instead of using weakref.ref (which fails), store it directly
+    self._application = application
+JobQueue.set_application = _qp_set_application
+# ─────────────────────────────────────────────────────────────────
+
 # ─── CONFIG ─────────────────────────────────────────────────────
 TOKEN          = os.getenv("TOKEN", "8199259072:AAHfLDID2q6QGs43LnmF6FsixhdyNOR9pEQ")
-CHECK_INTERVAL = 60  # seconds between checks
+CHECK_INTERVAL = 60  # seconds
 SPONSORED_MSG  = (
     "\n\n📢 *Sponsored*: Check out $MetaWhale – now live on Moonbags! "
     "Join the chat: https://t.me/MetaWhaleOfficial"
@@ -30,10 +38,10 @@ def save_json(path, data):
     with open(path, "w") as f:
         json.dump(data, f)
 
-tracked_wallets = load_json(TRACK_FILE, {})  # wallet → user_id
-last_seen       = load_json(STATE_FILE, {})  # wallet → last_tx_digest
+tracked_wallets = load_json(TRACK_FILE, {})   # wallet → user_id
+last_seen       = load_json(STATE_FILE, {})    # wallet → last_tx_digest
 
-# ─── Telegram Commands ───────────────────────────────────────────
+# ─── TELEGRAM COMMANDS ────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🐸 *Welcome to FOMO Frog Tracker!*\n\n"
@@ -42,40 +50,40 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 📦 Multi‑Wallet Support\n"
         "• 📢 Sponsored Alerts\n\n"
         "👉 Use `/track <wallet>` to begin.\n"
-        "👉 Use `/listwallets` to view your wallets.",
+        "👉 Use `/listwallets` to see your wallets.",
         parse_mode="Markdown"
     )
 
 async def track_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await update.message.reply_text("Usage: /track <wallet_address>")
-    w = context.args[0].lower()
-    uid = update.effective_chat.id
-    tracked_wallets[w] = uid
+    wallet = context.args[0].lower()
+    user_id = update.effective_chat.id
+    tracked_wallets[wallet] = user_id
     save_json(TRACK_FILE, tracked_wallets)
-    await update.message.reply_text(f"✅ Now tracking `{w}`", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Now tracking `{wallet}`", parse_mode="Markdown")
 
 async def untrack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await update.message.reply_text("Usage: /untrack <wallet_address>")
-    w = context.args[0].lower()
-    uid = update.effective_chat.id
-    if tracked_wallets.get(w) == uid:
-        tracked_wallets.pop(w)
+    wallet = context.args[0].lower()
+    user_id = update.effective_chat.id
+    if tracked_wallets.get(wallet) == user_id:
+        tracked_wallets.pop(wallet)
         save_json(TRACK_FILE, tracked_wallets)
-        await update.message.reply_text(f"❌ Untracked `{w}`", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ Untracked `{wallet}`", parse_mode="Markdown")
     else:
         await update.message.reply_text("That wallet isn’t in your list.")
 
 async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_chat.id
-    my = [w for w, u in tracked_wallets.items() if u == uid]
-    if not my:
+    user_id = update.effective_chat.id
+    user_wallets = [w for w, uid in tracked_wallets.items() if uid == user_id]
+    if not user_wallets:
         return await update.message.reply_text("No wallets being tracked.")
-    lines = "\n".join(f"- `{w}`" for w in my)
-    await update.message.reply_text(f"📋 *Your wallets:*\n{lines}", parse_mode="Markdown")
+    msg = "📋 *Your tracked wallets:*\n" + "\n".join(f"- `{w}`" for w in user_wallets)
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
-# ─── On‑Chain Helpers ─────────────────────────────────────────────
+# ─── ON‑CHAIN HELPERS ─────────────────────────────────────────────
 def get_latest_txs(wallet):
     r = requests.get(API_TX.format(wallet), timeout=10)
     return r.json() if r.ok else []
@@ -85,41 +93,44 @@ def get_balance(wallet):
     if not r.ok:
         return "unknown"
     data = r.json()
-    sui = next((b for b in data if b["type"] == "SUI"), {"balance": 0})["balance"]
-    tokens = len([b for b in data if b["type"] != "SUI"])
+    sui = next((b["balance"] for b in data if b["type"]=="SUI"), 0)
+    tokens = len([b for b in data if b["type"]!="SUI"])
     return f"{int(sui)/1e9:,.0f} SUI + {tokens} tokens"
 
 def shorten(addr, n=6):
     return addr[:n] + "…" + addr[-n:]
 
-# ─── Monitor Loop ────────────────────────────────────────────────
+# ─── MONITOR LOOP ─────────────────────────────────────────────────
 async def monitor_wallets(bot):
     global last_seen
-    await asyncio.sleep(10)  # give bot time to start
+    await asyncio.sleep(5)  # give Telegram API a moment
     while True:
         for wallet, user_id in list(tracked_wallets.items()):
             print(f"🔍 Checking {wallet}, last_seen={last_seen.get(wallet)}")
             txs = get_latest_txs(wallet)
-            print(f"   → fetched {len(txs)} txs for {wallet}")
+            print(f"   → fetched {len(txs)} txs")
             if not txs:
                 continue
+
             latest = txs[0]["digest"]
             if latest == last_seen.get(wallet):
                 continue
+
             unseen = []
             for tx in reversed(txs):
                 if tx["digest"] == last_seen.get(wallet):
                     break
                 unseen.append(tx)
+
             for tx in unseen:
-                print(f"   → alert for {tx['digest']}")
+                print(f"   → sending alert for {tx['digest']}")
                 action    = tx.get("action", "TX").upper()
                 ts        = datetime.datetime.fromtimestamp(tx["timestamp_ms"]/1000)
                 timestamp = ts.strftime("%Y-%m-%d %H:%M:%S")
-                token_addr = tx.get("object_id", "unknown")
-                token_name = tx.get("symbol",    "unknown")
-                amount     = tx.get("amount",    "")
-                balance    = get_balance(wallet)
+                token_addr= tx.get("object_id", "unknown")
+                token_name= tx.get("symbol",    "unknown")
+                amount    = tx.get("amount",    "")
+                balance   = get_balance(wallet)
 
                 msg = (
                     f"🐋 *Wallet Activity Alert!*\n"
@@ -140,7 +151,7 @@ async def monitor_wallets(bot):
         save_json(STATE_FILE, last_seen)
         await asyncio.sleep(CHECK_INTERVAL)
 
-# ─── Entry Point ─────────────────────────────────────────────────
+# ─── ENTRY POINT ─────────────────────────────────────────────────
 async def main():
     # 1) clear webhook & pending updates
     requests.post(
@@ -150,16 +161,16 @@ async def main():
     # 2) build the Application
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # 3) add handlers
+    # 3) register handlers
     app.add_handler(CommandHandler("start",      start))
     app.add_handler(CommandHandler("track",      track_cmd))
     app.add_handler(CommandHandler("untrack",    untrack_cmd))
     app.add_handler(CommandHandler("listwallets", list_cmd))
 
-    # 4) start monitor loop in background
+    # 4) start monitor loop
     asyncio.create_task(monitor_wallets(app.bot))
 
-    # 5) run polling (async)
+    # 5) begin polling
     await app.run_polling()
 
 if __name__ == "__main__":
