@@ -143,21 +143,23 @@ async def send_alert(bot, user_id, wallet, tx):
 
 # ─── BOT BOOTSTRAP ────────────────────────────────────────────────
 async def main():
+    # Build the Telegram Application
     app = ApplicationBuilder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start",      start))
-    app.add_handler(CommandHandler("track",      track_cmd))
-    app.add_handler(CommandHandler("untrack",    untrack_cmd))
+    # Register your command handlers
+    app.add_handler(CommandHandler("start",       start))
+    app.add_handler(CommandHandler("track",       track_cmd))
+    app.add_handler(CommandHandler("untrack",     untrack_cmd))
     app.add_handler(CommandHandler("listwallets", list_cmd))
 
-    # Start monitoring in background
+    # Clear any webhook on this bot instance to avoid conflicts
+    await app.bot.delete_webhook()
+
+    # Start the background wallet monitor
     asyncio.create_task(monitor_wallets(app.bot))
 
-    # Run polling, clear webhooks and drop pending updates to avoid conflicts
-    await app.run_polling(
-        revoke_webhook=True,
-        drop_pending_updates=True
-    )
+    # Start polling (no extra args)
+    await app.run_polling()
 
 if __name__ == "__main__":
     nest_asyncio.apply()
