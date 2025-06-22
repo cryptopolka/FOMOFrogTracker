@@ -92,7 +92,7 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = "\n".join(f"- `{w}`" for w in my)
     await update.message.reply_text(f"📋 *Your wallets:*\n{lines}", parse_mode="Markdown")
 
-# ─── On‑chain helpers (with fallback) ─────────────────────────────
+# ─── On‑chain helpers (with REST→RPC fallback) ────────────────────
 def get_latest_txs(wallet):
     try:
         r = requests.get(API_TX.format(wallet), timeout=10)
@@ -100,7 +100,7 @@ def get_latest_txs(wallet):
         return r.json()
     except Exception as e:
         logging.warning(f"Primary API failed for {wallet}: {e}")
-        # fallback to JSON‑RPC
+        # Fallback via JSON‑RPC
         try:
             payload = {
                 "jsonrpc": "2.0",
@@ -145,7 +145,7 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         unseen = [tx for tx in reversed(txs) if tx["digest"] != last_seen.get(wallet)]
-        logging.info(f" → {len(unseen)} new tx(s)")
+        logging.info(f" → {len(unseen)} new tx(s) for {wallet}")
 
         for tx in unseen:
             ts   = datetime.datetime.fromtimestamp(tx["timestamp_ms"]/1000)
@@ -172,32 +172,33 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
 # ─── ENTRY POINT ─────────────────────────────────────────────────
 def main():
-    # clear old webhook & updates
+    # Clear old webhook + pending updates
     requests.post(
         f"https://api.telegram.org/bot{TOKEN}"
         f"/deleteWebhook?drop_pending_updates=true"
     )
-    # set new webhook
+    # Set new webhook endpoint
     endpoint = f"{WEBHOOK_URL}/{TOKEN}"
     requests.post(
         f"https://api.telegram.org/bot{TOKEN}"
         f"/setWebhook?url={endpoint}"
     )
 
+    # Logging
     logging.basicConfig(format="%(asctime)s %(levelname)s:%(message)s", level=logging.INFO)
 
+    # Build and configure the bot
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # register handlers
     app.add_handler(CommandHandler("start",      start))
     app.add_handler(CommandHandler("track",      track_cmd))
     app.add_handler(CommandHandler("untrack",    untrack_cmd))
     app.add_handler(CommandHandler("listwallets", list_cmd))
 
-    # schedule monitor
+    # Schedule background monitoring
     app.job_queue.run_repeating(monitor_job, interval=CHECK_INTERVAL, first=10)
 
-    # run webhook server (blocks)
+    # Start the webhook server (blocks)
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
