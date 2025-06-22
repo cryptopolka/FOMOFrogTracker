@@ -5,6 +5,7 @@ import os
 import datetime
 import requests
 import logging
+
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -13,13 +14,14 @@ from telegram.ext import (
     JobQueue,
 )
 
-# ─── 1) Monkey‑patch JobQueue to avoid weakref bug ─────────────
-def _set_app(self, application):
-    # store application directly instead of weakref
-    self._application = application
-JobQueue.set_application = _set_app
+# ─── 1) Patch JobQueue to avoid weakref bug ─────────────────────────
+def _patch_set_application(self, application):
+    # store a callable that returns the application
+    self._application = lambda: application
+JobQueue.set_application = _patch_set_application
+# ────────────────────────────────────────────────────────────────────
 
-# ─── 2) Configuration ──────────────────────────────────────────
+# ─── 2) Config ─────────────────────────────────────────────────────
 TOKEN          = os.getenv("TOKEN", "8199259072:AAHfLDID2q6QGs43LnmF6FsixhdyNOR9pEQ")
 CHECK_INTERVAL = 60  # seconds between checks
 SPONSORED_MSG  = (
@@ -32,8 +34,9 @@ STATE_FILE = "wallet_last_tx.json"    # { wallet: last_seen_digest }
 
 API_TX  = "https://api.suiscan.xyz/v1/accounts/{}/txns?limit=5"
 API_BAL = "https://api.suiscan.xyz/v1/accounts/{}/balances"
+# ────────────────────────────────────────────────────────────────────
 
-# ─── 3) State Persistence ───────────────────────────────────────
+# ─── 3) State persistence ──────────────────────────────────────────
 def load_json(path, default):
     return json.load(open(path, "r")) if os.path.exists(path) else default
 
@@ -44,7 +47,7 @@ def save_json(path, data):
 tracked_wallets = load_json(TRACK_FILE, {})  # wallet → user_id
 last_seen       = load_json(STATE_FILE, {})  # wallet → last_tx_digest
 
-# ─── 4) Telegram Commands ───────────────────────────────────────
+# ─── 4) Telegram command handlers ─────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🐸 *Welcome to FOMO Frog Tracker!*\n\n"
@@ -80,13 +83,13 @@ async def untrack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_chat.id
-    my = [w for w,u in tracked_wallets.items() if u==uid]
+    my = [w for w,u in tracked_wallets.items() if u == uid]
     if not my:
         return await update.message.reply_text("No wallets being tracked.")
     lines = "\n".join(f"- `{w}`" for w in my)
     await update.message.reply_text(f"📋 *Your wallets:*\n{lines}", parse_mode="Markdown")
 
-# ─── 5) On‑chain Helpers ────────────────────────────────────────
+# ─── 5) Blockchain helpers ─────────────────────────────────────────
 def get_latest_txs(wallet):
     r = requests.get(API_TX.format(wallet), timeout=10)
     return r.json() if r.ok else []
@@ -103,7 +106,7 @@ def get_balance(wallet):
 def shorten(addr, n=6):
     return addr[:n] + "…" + addr[-n:]
 
-# ─── 6) Monitor Job ─────────────────────────────────────────────
+# ─── 6) Monitor job ─────────────────────────────────────────────────
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     global last_seen
     bot = context.bot
@@ -113,16 +116,17 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
         logging.info(f" → fetched {len(txs)} txs")
         if not txs:
             continue
+
         latest = txs[0]["digest"]
         if latest == last_seen.get(wallet):
             continue
-        # collect unseen
+
         unseen = []
         for tx in reversed(txs):
             if tx["digest"] == last_seen.get(wallet):
                 break
             unseen.append(tx)
-        # send alerts
+
         for tx in unseen:
             action    = tx.get("action","TX").upper()
             ts        = datetime.datetime.fromtimestamp(tx["timestamp_ms"]/1000)
@@ -131,6 +135,7 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
             token_name= tx.get("symbol","unknown")
             amount    = tx.get("amount","")
             balance   = get_balance(wallet)
+
             msg = (
                 f"🐋 *Wallet Activity Alert!*\n"
                 f"Wallet: `{shorten(wallet)}`\n"
@@ -144,30 +149,34 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
                 f"{SPONSORED_MSG}"
             )
             await bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
+
         last_seen[wallet] = latest
+
     save_json(STATE_FILE, last_seen)
 
-# ─── 7) Entry Point ─────────────────────────────────────────────
+# ─── 7) Entry point ────────────────────────────────────────────────
 def main():
-    # clear any webhook + pending updates
+    # clear webhook & pending updates
     requests.post(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true")
 
-    # basic logging
-    logging.basicConfig(format="%(asctime)s %(levelname)s:%(message)s", level=logging.INFO)
+    # logging
+    logging.basicConfig(
+        format="%(asctime)s %(levelname)s:%(message)s", level=logging.INFO
+    )
 
-    # build the Application
+    # build application
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # register commands
+    # register handlers
     app.add_handler(CommandHandler("start",      start))
     app.add_handler(CommandHandler("track",      track_cmd))
     app.add_handler(CommandHandler("untrack",    untrack_cmd))
     app.add_handler(CommandHandler("listwallets", list_cmd))
 
-    # schedule monitor every CHECK_INTERVAL seconds
+    # schedule monitor job
     app.job_queue.run_repeating(monitor_job, interval=CHECK_INTERVAL, first=10)
 
-    # start polling (blocks here)
+    # start polling (blocks)
     app.run_polling()
 
 if __name__ == "__main__":
