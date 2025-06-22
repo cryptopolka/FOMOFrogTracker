@@ -1,2 +1,4 @@
-python-telegram-bot[job-queue,webhooks]==20.3
+python-telegram-bot
+apscheduler
+numpy
 requests
