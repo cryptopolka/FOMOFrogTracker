@@ -14,13 +14,14 @@ from telegram.ext import (
 )
 
 # ─── CONFIG ─────────────────────────────────────────────────────
-# These must be set in your Render service's Environment Variables:
-#  • TOKEN: your BotFather token
-#  • WEBHOOK_URL: https://<your‑service>.onrender.com
-TOKEN        = os.getenv("TOKEN", "8199259072:AAHfLDID2q6QGs43LnmF6FsixhdyNOR9pEQ")
-WEBHOOK_URL  = os.getenv("WEBHOOK_URL", "https://example.com")
-PORT         = int(os.getenv("PORT", "8443"))
-CHECK_INTERVAL = 60  # seconds
+# Set these in Render’s Environment:
+#  TOKEN       – your BotFather token
+#  WEBHOOK_URL – your service URL, e.g. https://fomofrogtracker.onrender.com
+#  PORT        – the port Render assigns, e.g. 10000 (as a string)
+TOKEN        = os.getenv("TOKEN")
+WEBHOOK_URL  = os.getenv("WEBHOOK_URL")
+PORT         = int(os.getenv("PORT", "80"))
+CHECK_INTERVAL = 60
 
 SPONSORED_MSG = (
     "\n\n📢 *Sponsored*: Check out $MetaWhale – now live on Moonbags! "
@@ -42,8 +43,8 @@ def save_json(path, data):
     with open(path, "w") as f:
         json.dump(data, f)
 
-tracked_wallets = load_json(TRACK_FILE, {})
-last_seen       = load_json(STATE_FILE, {})
+tracked_wallets = load_json(TRACK_FILE, {})  # wallet → user_id
+last_seen       = load_json(STATE_FILE, {})  # wallet → last_tx_digest
 
 # ─── COMMAND HANDLERS ─────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -52,7 +53,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /track <wallet>\n"
         "• /untrack <wallet>\n"
         "• /listwallets\n\n"
-        "Alerts will arrive here privately whenever your tracked wallet transacts.",
+        "Alerts will arrive here privately when your tracked wallet transacts.",
         parse_mode="Markdown"
     )
 
@@ -79,7 +80,7 @@ async def untrack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_chat.id
-    my = [w for w, u in tracked_wallets.items() if u == uid]
+    my = [w for w,u in tracked_wallets.items() if u == uid]
     if not my:
         return await update.message.reply_text("No wallets being tracked.")
     lines = "\n".join(f"- `{w}`" for w in my)
@@ -92,7 +93,8 @@ def get_latest_txs(wallet):
 
 def get_balance(wallet):
     r = requests.get(API_BAL.format(wallet), timeout=10)
-    if not r.ok: return "unknown"
+    if not r.ok:
+        return "unknown"
     data = r.json()
     sui = next((b["balance"] for b in data if b["type"]=="SUI"), 0)
     toks = len([b for b in data if b["type"]!="SUI"])
@@ -101,41 +103,53 @@ def get_balance(wallet):
 def shorten(addr, n=6):
     return addr[:n] + "…" + addr[-n:]
 
-# ─── MONITOR LOOP ─────────────────────────────────────────────────
+# ─── MONITOR JOB ──────────────────────────────────────────────────
 async def monitor_wallets(context: ContextTypes.DEFAULT_TYPE):
     global last_seen
     bot = context.bot
     for wallet, uid in list(tracked_wallets.items()):
-        logging.info(f"Checking {wallet}, last_seen={last_seen.get(wallet)}")
+        logging.info(f"🔍 Checking {wallet}, last_seen={last_seen.get(wallet)}")
         txs = get_latest_txs(wallet)
-        logging.info(f" → fetched {len(txs)} txs")
+        logging.info(f"   → fetched {len(txs)} txs")
         if not txs:
             continue
+
         latest = txs[0]["digest"]
         if latest == last_seen.get(wallet):
             continue
-        unseen = [tx for tx in reversed(txs) 
-                  if tx["digest"] != last_seen.get(wallet)]
+
+        unseen = []
+        for tx in reversed(txs):
+            if tx["digest"] == last_seen.get(wallet):
+                break
+            unseen.append(tx)
+
         for tx in unseen:
-            action = tx.get("action","TX").upper()
-            ts = datetime.datetime.fromtimestamp(tx["timestamp_ms"]/1000)
-            when = ts.strftime("%Y-%m-%d %H:%M:%S")
-            addr = tx.get("object_id","unknown")
-            sym  = tx.get("symbol","unknown")
-            amt  = tx.get("amount","")
-            bal  = get_balance(wallet)
+            logging.info(f"   → sending alert for {tx['digest']}")
+            action    = tx.get("action","TX").upper()
+            ts        = datetime.datetime.fromtimestamp(tx["timestamp_ms"]/1000)
+            timestamp = ts.strftime("%Y-%m-%d %H:%M:%S")
+            addr      = tx.get("object_id","unknown")
+            sym       = tx.get("symbol","unknown")
+            amt       = tx.get("amount","")
+            bal       = get_balance(wallet)
+
             msg = (
-                f"🐋 *Wallet Alert!*\n"
-                f"`{shorten(wallet)}` • *{action}*\n"
-                f"{sym} • {amt}\n"
-                f"Contract `{addr}`\n"
+                f"🐋 *Wallet Activity Alert!*\n"
+                f"Wallet: `{shorten(wallet)}`\n"
+                f"Action: *{action}*\n"
+                f"Token: *{sym}*\n"
+                f"Amount: {amt}\n"
+                f"Contract: `{addr}`\n"
                 f"Balance: {bal}\n"
-                f"Time: {when}\n"
+                f"Time: {timestamp}\n"
                 f"Tx: https://suivision.xyz/tx/{tx['digest']}"
                 f"{SPONSORED_MSG}"
             )
             await bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
+
         last_seen[wallet] = latest
+
     save_json(STATE_FILE, last_seen)
 
 # ─── ENTRY POINT ─────────────────────────────────────────────────
@@ -147,40 +161,31 @@ def main():
     )
 
     # 2) Logging
-    logging.basicConfig(
-        format="%(asctime)s %(levelname)s:%(message)s", level=logging.INFO
-    )
+    logging.basicConfig(format="%(asctime)s %(levelname)s:%(message)s", level=logging.INFO)
 
     # 3) Build the application
-    app = (
-        ApplicationBuilder()
-        .token(TOKEN)
-        .webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
-        )
-        .build()
-    )
+    app = ApplicationBuilder().token(TOKEN).build()
 
     # 4) Register commands
-    for cmd, fn in [
-        ("start", start),
-        ("track", track_cmd),
-        ("untrack", untrack_cmd),
-        ("listwallets", list_cmd),
-    ]:
-        app.add_handler(CommandHandler(cmd, fn))
+    app.add_handler(CommandHandler("start",      start))
+    app.add_handler(CommandHandler("track",      track_cmd))
+    app.add_handler(CommandHandler("untrack",    untrack_cmd))
+    app.add_handler(CommandHandler("listwallets", list_cmd))
 
-    # 5) Schedule the monitoring job
-    app.job_queue.run_repeating(
-        monitor_wallets,
-        interval=CHECK_INTERVAL,
-        first=10
+    # 5) Register the monitor job every CHECK_INTERVAL seconds
+    app.job_queue.run_repeating(monitor_wallets, interval=CHECK_INTERVAL, first=10)
+
+    # 6) Set webhook so Telegram will POST updates here
+    webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
+    app.bot.set_webhook(webhook_url)
+
+    # 7) Run webhook server (blocks)
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN,
+        webhook_url=webhook_url
     )
-
-    # 6) Start webhook (this blocks)
-    app.run_webhook()
 
 if __name__ == "__main__":
     main()
