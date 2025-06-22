@@ -1,16 +1,12 @@
 # fomo_frog_tracker.py
 
-import logging
+import asyncio
 import json
 import os
 import datetime
 import requests
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ─── CONFIG ─────────────────────────────────────────────────────
 TOKEN          = os.getenv("TOKEN", "8199259072:AAHfLDID2q6QGs43LnmF6FsixhdyNOR9pEQ")
@@ -27,7 +23,6 @@ API_TX  = "https://api.suiscan.xyz/v1/accounts/{}/txns?limit=5"
 API_BAL = "https://api.suiscan.xyz/v1/accounts/{}/balances"
 # ─────────────────────────────────────────────────────────────────
 
-# ─── State Persistence ───────────────────────────────────────────
 def load_json(path, default):
     return json.load(open(path, "r")) if os.path.exists(path) else default
 
@@ -47,7 +42,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 📦 Multi‑Wallet Support\n"
         "• 📢 Sponsored Alerts\n\n"
         "👉 Use `/track <wallet>` to begin.\n"
-        "👉 Use `/listwallets` to see your wallets.",
+        "👉 Use `/listwallets` to view your wallets.",
         parse_mode="Markdown"
     )
 
@@ -97,84 +92,75 @@ def get_balance(wallet):
 def shorten(addr, n=6):
     return addr[:n] + "…" + addr[-n:]
 
-# ─── Background Job ──────────────────────────────────────────────
-async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
+# ─── Monitor Loop ────────────────────────────────────────────────
+async def monitor_wallets(bot):
     global last_seen
-    bot = context.bot
+    await asyncio.sleep(10)  # give bot time to start
+    while True:
+        for wallet, user_id in list(tracked_wallets.items()):
+            print(f"🔍 Checking {wallet}, last_seen={last_seen.get(wallet)}")
+            txs = get_latest_txs(wallet)
+            print(f"   → fetched {len(txs)} txs for {wallet}")
+            if not txs:
+                continue
+            latest = txs[0]["digest"]
+            if latest == last_seen.get(wallet):
+                continue
+            unseen = []
+            for tx in reversed(txs):
+                if tx["digest"] == last_seen.get(wallet):
+                    break
+                unseen.append(tx)
+            for tx in unseen:
+                print(f"   → alert for {tx['digest']}")
+                action    = tx.get("action", "TX").upper()
+                ts        = datetime.datetime.fromtimestamp(tx["timestamp_ms"]/1000)
+                timestamp = ts.strftime("%Y-%m-%d %H:%M:%S")
+                token_addr = tx.get("object_id", "unknown")
+                token_name = tx.get("symbol",    "unknown")
+                amount     = tx.get("amount",    "")
+                balance    = get_balance(wallet)
 
-    for wallet, user_id in list(tracked_wallets.items()):
-        logging.info(f"Checking wallet {wallet}, last_seen={last_seen.get(wallet)}")
-        txs = get_latest_txs(wallet)
-        logging.info(f" → fetched {len(txs)} txs for {wallet}")
-        if not txs:
-            continue
+                msg = (
+                    f"🐋 *Wallet Activity Alert!*\n"
+                    f"Wallet: `{shorten(wallet)}`\n"
+                    f"Action: *{action}*\n"
+                    f"Token: *{token_name}*\n"
+                    f"Amount: {amount}\n"
+                    f"Contract: `{token_addr}`\n"
+                    f"Balance: {balance}\n"
+                    f"Time: {timestamp}\n"
+                    f"Tx: https://suivision.xyz/tx/{tx['digest']}"
+                    f"{SPONSORED_MSG}"
+                )
+                await bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown")
 
-        latest = txs[0]["digest"]
-        if latest == last_seen.get(wallet):
-            continue
+            last_seen[wallet] = latest
 
-        unseen = []
-        for tx in reversed(txs):
-            if tx["digest"] == last_seen.get(wallet):
-                break
-            unseen.append(tx)
+        save_json(STATE_FILE, last_seen)
+        await asyncio.sleep(CHECK_INTERVAL)
 
-        for tx in unseen:
-            logging.info(f" → alert for {tx['digest']}")
-            action    = tx.get("action", "TX").upper()
-            ts        = datetime.datetime.fromtimestamp(tx["timestamp_ms"] / 1000)
-            timestamp = ts.strftime("%Y-%m-%d %H:%M:%S")
-            token_addr = tx.get("object_id", "unknown")
-            token_name = tx.get("symbol",    "unknown")
-            amount     = tx.get("amount",    "")
-            balance    = get_balance(wallet)
-
-            msg = (
-                f"🐋 *Wallet Activity Alert!*\n"
-                f"Wallet: `{shorten(wallet)}`\n"
-                f"Action: *{action}*\n"
-                f"Token: *{token_name}*\n"
-                f"Amount: {amount}\n"
-                f"Contract: `{token_addr}`\n"
-                f"Balance: {balance}\n"
-                f"Time: {timestamp}\n"
-                f"Tx: https://suivision.xyz/tx/{tx['digest']}"
-                f"{SPONSORED_MSG}"
-            )
-            await bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown")
-
-        last_seen[wallet] = latest
-
-    save_json(STATE_FILE, last_seen)
-
-# ─── ENTRY POINT ─────────────────────────────────────────────────
-def main():
-    # Clear webhook & pending updates
+# ─── Entry Point ─────────────────────────────────────────────────
+async def main():
+    # 1) clear webhook & pending updates
     requests.post(
         f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true"
     )
 
-    # Logging
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
-    )
-
-    # Build application
+    # 2) build the Application
     app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("track", track_cmd))
-    app.add_handler(CommandHandler("untrack", untrack_cmd))
+
+    # 3) add handlers
+    app.add_handler(CommandHandler("start",      start))
+    app.add_handler(CommandHandler("track",      track_cmd))
+    app.add_handler(CommandHandler("untrack",    untrack_cmd))
     app.add_handler(CommandHandler("listwallets", list_cmd))
 
-    # Schedule monitor_job every CHECK_INTERVAL seconds
-    app.job_queue.run_repeating(
-        monitor_job,
-        interval=CHECK_INTERVAL,
-        first=10
-    )
+    # 4) start monitor loop in background
+    asyncio.create_task(monitor_wallets(app.bot))
 
-    # Start polling (blocks here)
-    app.run_polling()
+    # 5) run polling (async)
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
