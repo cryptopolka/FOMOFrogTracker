@@ -9,15 +9,13 @@ TELE_TOKEN = os.getenv("TELE_TOKEN")
 RSI_PERIOD = int(os.getenv("RSI_PERIOD", 14))
 OVERBOT    = int(os.getenv("RSI_OVERBOUGHT", 70))
 OVERSOLD   = int(os.getenv("RSI_OVERSOLD", 30))
-PAIR_IDS   = os.getenv("PAIR_IDS", "").split(",")
 
 # ── DYNAMIC CHAT STORAGE ────────────────────────────────────
-# Stores chat IDs of users/groups that started the bot
 RECIPIENTS = set()
 
 # ── OPTIONAL LEGIT CHECK STUB ───────────────────────────────
-def is_legit(pair_id):
-    # TODO: implement your liquidity‑lock, age, holder, volume, audit checks
+def is_legit(pair):
+    # TODO: implement liquidity‑lock, age, holder, volume, audit checks
     return True
 
 # ── RSI CALCULATION ─────────────────────────────────────────
@@ -35,8 +33,8 @@ async def start(update, ctx):
     chat_id = update.effective_chat.id
     RECIPIENTS.add(chat_id)
     await update.message.reply_text(
-        "🐸 Welcome to *FOMO Frog Tracker*! I scan your Sui tokens every 30 min.\n"
-        "You will receive periodic RSI alerts here.\n"
+        "🐸 Welcome to *FOMO Frog Tracker*! I scan top Sui token pairs every 30 min.\n"
+        "You will receive a report of the top 5 overbought & oversold tokens by RSI.\n"
         "Type /help for more info.",
         parse_mode="Markdown"
     )
@@ -45,62 +43,75 @@ async def start(update, ctx):
 async def help_cmd(update, ctx):
     await update.message.reply_text(
         "Commands:\n"
-        "/start  – Register this chat for periodic RSI alerts\n"
+        "/start  – Register this chat for periodic RSI scans\n"
         "/help   – Show this help message\n"
-        "The bot scans automatically every 30 min; no further commands needed."
+        "Scans top pairs on Dexscreener every 30 min, no further commands needed."
     )
 
 # ── SCAN JOB ─────────────────────────────────────────────────
 async def scan_all(app, _):
     overbought, oversold = [], []
+    entries = []
 
-    for pid in PAIR_IDS:
+    # Fetch all Sui pairs from Dexscreener
+    resp = requests.get(
+        "https://api.dexscreener.com/latest/dex/pairs/sui"
+    ).json().get("pairs", [])
+
+    for pair in resp:
         try:
-            resp       = requests.get(
-                f"https://api.dexscreener.com/latest/dex/pairs/sui/{pid}"
-            ).json()["pairs"][0]
-            symbol     = resp["symbol"]
-            dex        = resp["dexId"]
-            liquidity  = float(resp["liquidity"]["usd"])
-            closes     = np.array([pt[1] for pt in resp["chart"]])
-            rsi_value  = compute_rsi(closes, RSI_PERIOD)[-1]
+            if not is_legit(pair):
+                continue
+            symbol    = pair.get("symbol")
+            dex       = pair.get("dexId")
+            liquidity = float(pair.get("liquidity", {}).get("usd", 0))
+            # extract price series
+            closes    = np.array([pt[1] for pt in pair.get("chart", [])])
+            if len(closes) < RSI_PERIOD:
+                continue
+            rsi_value = compute_rsi(closes, RSI_PERIOD)[-1]
+            entries.append({
+                "symbol": symbol,
+                "dex": dex,
+                "liquidity": liquidity,
+                "rsi": rsi_value
+            })
         except Exception:
             continue
 
-        if not is_legit(pid):
-            continue
+    # Sort by RSI
+    sorted_entries = sorted(entries, key=lambda x: x["rsi"])
+    # Top 5 oversold (lowest RSI)
+    oversold_list   = sorted_entries[:5]
+    # Top 5 overbought (highest RSI)
+    overbought_list = sorted_entries[-5:][::-1]
 
-        label = (
-            f"{symbol} on *{dex}* (Liquidity: ${liquidity:,.0f}) — RSI {rsi_value:.1f}"
-        )
-        if rsi_value > OVERBOT:
-            overbought.append(label)
-        elif rsi_value < OVERSOLD:
-            oversold.append(label)
-
+    # Build report
     report  = "🐸 *FOMO Frog Tracker — RSI Scan Results* (every 30 min)\n\n"
-    if overbought:
-        report += "⚠️ *Overbought:*\n" + "\n".join(overbought) + "\n\n"
-    if oversold:
-        report += "✅ *Oversold:*\n"   + "\n".join(oversold) + "\n\n"
+    if overbought_list:
+        report += "⚠️ *Top 5 Overbought:*\n"
+        for e in overbought_list:
+            report += f"{e['symbol']} on *{e['dex']}* (Liq ${e['liquidity']:,.0f}) — RSI {e['rsi']:.1f}\n"
+        report += "\n"
+    if oversold_list:
+        report += "✅ *Top 5 Oversold:*\n"
+        for e in oversold_list:
+            report += f"{e['symbol']} on *{e['dex']}* (Liq ${e['liquidity']:,.0f}) — RSI {e['rsi']:.1f}\n"
+        report += "\n"
     report += (
         "_Note: FOMO Frog Tracker is for alerts only. DYOR—any trades are at your own risk._"
     )
 
-    # Send report to all registered chats
+    # Broadcast to registered chats
     for chat_id in RECIPIENTS:
         await app.bot.send_message(chat_id, report, parse_mode="Markdown")
 
 # ── MAIN ENTRYPOINT ─────────────────────────────────────────
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELE_TOKEN).build()
-    # register commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help",  help_cmd))
-
-    # schedule the 30‑min scanner
     scheduler = AsyncIOScheduler()
     scheduler.add_job(lambda: scan_all(app, None), "interval", minutes=30)
     scheduler.start()
-
     app.run_polling()
