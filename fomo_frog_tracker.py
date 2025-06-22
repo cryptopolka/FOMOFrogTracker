@@ -6,7 +6,12 @@ import datetime
 import logging
 import requests
 
-# ─── Patch JobQueue to avoid the PTB weakref bug ────────────────────
+# ─── Silence lower‑level HTTP logs ───────────────────────────────
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
+# ──────────────────────────────────────────────────────────────────
+
+# ─── Patch JobQueue to avoid the PTB weakref bug ──────────────────
 import telegram.ext._jobqueue as _jq
 def _patch_set_app(self, application):
     self._application = lambda: application
@@ -87,7 +92,7 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = "\n".join(f"- `{w}`" for w in my)
     await update.message.reply_text(f"📋 *Your wallets:*\n{lines}", parse_mode="Markdown")
 
-# ─── ON‑CHAIN HELPERS (with error handling) ─────────────────────
+# ─── ON‑CHAIN HELPERS (with error handling) ───────────────────────
 def get_latest_txs(wallet):
     try:
         r = requests.get(API_TX.format(wallet), timeout=10)
@@ -112,7 +117,7 @@ def get_balance(wallet):
 def shorten(addr, n=6):
     return addr[:n] + "…" + addr[-n:]
 
-# ─── BACKGROUND MONITOR JOB ─────────────────────────────────────
+# ─── BACKGROUND MONITOR JOB ───────────────────────────────────────
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     global last_seen
     bot = context.bot
@@ -178,7 +183,7 @@ def main():
     app.add_handler(CommandHandler("untrack",    untrack_cmd))
     app.add_handler(CommandHandler("listwallets", list_cmd))
 
-    # Schedule monitor
+    # Schedule monitor job
     app.job_queue.run_repeating(monitor_job, interval=CHECK_INTERVAL, first=10)
 
     # Run webhook server
