@@ -21,20 +21,20 @@ from telegram.ext import (
 )
 
 # ─── 2) Configuration ────────────────────────────────────────────
-TOKEN        = os.getenv("TOKEN")        # BotFather token
-WEBHOOK_URL  = os.getenv("WEBHOOK_URL")  # e.g. https://fomo-frog-tracker.onrender.com
-PORT         = int(os.getenv("PORT", "80"))
-CHECK_INTERVAL = 60                      # seconds
+TOKEN         = os.getenv("TOKEN")        # BotFather token
+WEBHOOK_URL   = os.getenv("WEBHOOK_URL")  # e.g. https://fomo-frog-tracker.onrender.com
+PORT          = int(os.getenv("PORT", "80"))
+CHECK_INTERVAL = 60                      # seconds between SUI checks
 
 SPONSORED_MSG = (
     "\n\n📢 *Sponsored*: Check out $MetaWhale – now live on Moonbags! "
     "Join the chat: https://t.me/MetaWhaleOfficial"
 )
 
-TRACK_FILE  = "tracked_wallets.json"
-STATE_FILE  = "wallet_last_tx.json"
-API_TX  = "https://api.suiscan.xyz/v1/accounts/{}/txns?limit=5"
-API_BAL = "https://api.suiscan.xyz/v1/accounts/{}/balances"
+TRACK_FILE   = "tracked_wallets.json"
+STATE_FILE   = "wallet_last_tx.json"
+API_TX       = "https://api.suiscan.xyz/v1/accounts/{}/txns?limit=5"
+API_BAL      = "https://api.suiscan.xyz/v1/accounts/{}/balances"
 # ────────────────────────────────────────────────────────────────
 
 # ─── 3) State persistence ───────────────────────────────────────
@@ -48,7 +48,7 @@ def save_json(path, data):
 tracked_wallets = load_json(TRACK_FILE, {})  # wallet → chat_id
 last_seen       = load_json(STATE_FILE, {})  # wallet → last_digest
 
-# ─── 4) Telegram commands ───────────────────────────────────────
+# ─── 4) Telegram command handlers ───────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🐸 *Welcome to FOMO Frog Tracker!*\n\n"
@@ -81,13 +81,13 @@ async def untrack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_chat.id
-    my = [w for w,u in tracked_wallets.items() if u == uid]
+    my = [w for w, u in tracked_wallets.items() if u == uid]
     if not my:
         return await update.message.reply_text("No wallets being tracked.")
     lines = "\n".join(f"- `{w}`" for w in my)
     await update.message.reply_text(f"📋 *Your wallets:*\n{lines}", parse_mode="Markdown")
 
-# ─── 5) On‑chain helpers ────────────────────────────────────────
+# ─── 5) On-chain helpers ────────────────────────────────────────
 def get_latest_txs(wallet):
     r = requests.get(API_TX.format(wallet), timeout=10)
     return r.json() if r.ok else []
@@ -104,7 +104,7 @@ def get_balance(wallet):
 def shorten(addr, n=6):
     return addr[:n] + "…" + addr[-n:]
 
-# ─── 6) Background monitor job ─────────────────────────────────
+# ─── 6) Background monitor job ──────────────────────────────────
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     global last_seen
     bot = context.bot
@@ -139,34 +139,36 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
         last_seen[wallet] = latest
     save_json(STATE_FILE, last_seen)
 
-# ─── 7) Entry point ──────────────────────────────────────────────
+# ─── 7) Entry point ─────────────────────────────────────────────
 def main():
-    # Clear old webhook & pending updates
+    # 1) Clear existing webhook & pending updates
     requests.post(
         f"https://api.telegram.org/bot{TOKEN}"
         f"/deleteWebhook?drop_pending_updates=true"
     )
-    # Set new webhook
+    # 2) Set new webhook
     webhook_endpoint = f"{WEBHOOK_URL}/{TOKEN}"
     requests.post(
         f"https://api.telegram.org/bot{TOKEN}"
         f"/setWebhook?url={webhook_endpoint}"
     )
 
+    # 3) Logging
     logging.basicConfig(format="%(asctime)s %(levelname)s:%(message)s", level=logging.INFO)
 
+    # 4) Build application
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Register handlers
+    # 5) Register command handlers
     app.add_handler(CommandHandler("start",      start))
     app.add_handler(CommandHandler("track",      track_cmd))
     app.add_handler(CommandHandler("untrack",    untrack_cmd))
     app.add_handler(CommandHandler("listwallets", list_cmd))
 
-    # Schedule the monitor
+    # 6) Schedule monitor job
     app.job_queue.run_repeating(monitor_job, interval=CHECK_INTERVAL, first=10)
 
-    # Start webhook server (blocks)
+    # 7) Run the webhook server (blocks)
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
