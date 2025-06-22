@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 import numpy as np
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -13,10 +14,44 @@ OVERSOLD   = int(os.getenv("RSI_OVERSOLD", 30))
 # ── DYNAMIC CHAT STORAGE ────────────────────────────────────
 RECIPIENTS = set()
 
-# ── OPTIONAL LEGIT CHECK STUB ───────────────────────────────
+# ── SECURITY CHECKS ─────────────────────────────────────────
+def is_liquidity_sufficient(pair, min_usd=1000):
+    try:
+        return float(pair.get("liquidity", {}).get("usd", 0)) >= min_usd
+    except:
+        return False
+
+def is_token_old_enough(pair, min_hours=24):
+    # chart timestamps are ms-since-epoch, oldest first
+    chart = pair.get("chart", [])
+    if not chart:
+        return False
+    first_ts = chart[0][0] / 1000
+    age_hours = (time.time() - first_ts) / 3600
+    return age_hours >= min_hours
+
+def is_price_change_reasonable(pair, max_change_pct=100):
+    # filter out tokens with > max_change_pct% 24h swing
+    change = pair.get("priceChange", {}).get("h24", "0%")
+    try:
+        pct = abs(float(change.strip("%")))
+        return pct <= max_change_pct
+    except:
+        return False
+
+# Placeholder for holder distribution, social/audit checks
+# def is_holder_distribution_ok(pair): ...
+# def is_social_audit_valid(pair): ...
+
+# Combined legitimacy check
 def is_legit(pair):
-    # TODO: implement liquidity‑lock, age, holder, volume, audit checks
-    return True
+    return (
+        is_liquidity_sufficient(pair)
+        and is_token_old_enough(pair)
+        and is_price_change_reasonable(pair)
+        # and is_holder_distribution_ok(pair)
+        # and is_social_audit_valid(pair)
+    )
 
 # ── RSI CALCULATION ─────────────────────────────────────────
 def compute_rsi(prices, period):
@@ -24,40 +59,6 @@ def compute_rsi(prices, period):
     gains    = np.where(deltas > 0, deltas, 0)
     losses   = np.where(deltas < 0, -deltas, 0)
     avg_gain = np.convolve(gains,  np.ones(period)/period, mode='valid')
-    avg_loss = np.convolve(losses, np.ones(period)/period, mode='valid')
-    rs       = avg_gain / (avg_loss + 1e-8)
-    return 100 - (100 / (1 + rs))
-
-# ── /start COMMAND ──────────────────────────────────────────
-async def start(update, ctx):
-    chat_id = update.effective_chat.id
-    RECIPIENTS.add(chat_id)
-    await update.message.reply_text(
-        "🐸 Welcome to *FOMO Frog Tracker*! I scan top Sui token pairs every 30 min.\n"
-        "You will receive a report of the top 5 overbought & oversold tokens by RSI.\n"
-        "Type /help for more info.",
-        parse_mode="Markdown"
-    )
-
-# ── /help COMMAND ───────────────────────────────────────────
-async def help_cmd(update, ctx):
-    await update.message.reply_text(
-        "Commands:\n"
-        "/start  – Register this chat for periodic RSI scans\n"
-        "/help   – Show this help message\n"
-        "Scans top pairs on Dexscreener every 30 min, no further commands needed."
-    )
-
-# ── SCAN JOB ─────────────────────────────────────────────────
-async def scan_all(app, _):
-    overbought, oversold = [], []
-    entries = []
-
-    # Fetch all Sui pairs from Dexscreener
-    resp = requests.get(
-        "https://api.dexscreener.com/latest/dex/pairs/sui"
-    ).json().get("pairs", [])
-
     for pair in resp:
         try:
             if not is_legit(pair):
