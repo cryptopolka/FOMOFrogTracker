@@ -6,17 +6,15 @@ import datetime
 import logging
 import requests
 
-# ─── Silence lower‑level HTTP logs ───────────────────────────────
+# ─── Silence verbose HTTP logs ───────────────────────────────────
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
-# ──────────────────────────────────────────────────────────────────
 
-# ─── Patch JobQueue to avoid the PTB weakref bug ──────────────────
+# ─── Patch JobQueue weakref bug ──────────────────────────────────
 import telegram.ext._jobqueue as _jq
 def _patch_set_app(self, application):
     self._application = lambda: application
 _jq.JobQueue.set_application = _patch_set_app
-# ──────────────────────────────────────────────────────────────────
 
 from telegram import Update
 from telegram.ext import (
@@ -25,11 +23,11 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# ─── CONFIG ───────────────────────────────────────────────────────
+# ─── CONFIG ──────────────────────────────────────────────────────
 TOKEN         = os.getenv("TOKEN")        # BotFather token
 WEBHOOK_URL   = os.getenv("WEBHOOK_URL")  # e.g. https://fomo-frog-tracker.onrender.com
 PORT          = int(os.getenv("PORT", "80"))
-CHECK_INTERVAL = 60                       # seconds between checks
+CHECK_INTERVAL = 60                       # seconds
 
 SPONSORED_MSG = (
     "\n\n📢 *Sponsored*: Check out $MetaWhale – now live on Moonbags! "
@@ -38,11 +36,13 @@ SPONSORED_MSG = (
 
 TRACK_FILE    = "tracked_wallets.json"
 STATE_FILE    = "wallet_last_tx.json"
+
 API_TX        = "https://api.suiscan.xyz/v1/accounts/{}/txns?limit=5"
 API_BAL       = "https://api.suiscan.xyz/v1/accounts/{}/balances"
+FALLBACK_RPC  = "https://fullnode.mainnet.sui.io:443"  # JSON‑RPC endpoint
 # ──────────────────────────────────────────────────────────────────
 
-# ─── STATE PERSISTENCE ───────────────────────────────────────────
+# ─── State persistence ────────────────────────────────────────────
 def load_json(path, default):
     return json.load(open(path)) if os.path.exists(path) else default
 
@@ -53,7 +53,7 @@ def save_json(path, data):
 tracked_wallets = load_json(TRACK_FILE, {})  # wallet → chat_id
 last_seen       = load_json(STATE_FILE, {})  # wallet → last_digest
 
-# ─── COMMAND HANDLERS ────────────────────────────────────────────
+# ─── Command handlers ─────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🐸 *Welcome to FOMO Frog Tracker!*\n\n"
@@ -92,15 +92,28 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = "\n".join(f"- `{w}`" for w in my)
     await update.message.reply_text(f"📋 *Your wallets:*\n{lines}", parse_mode="Markdown")
 
-# ─── ON‑CHAIN HELPERS (with error handling) ───────────────────────
+# ─── On‑chain helpers (with fallback) ─────────────────────────────
 def get_latest_txs(wallet):
     try:
         r = requests.get(API_TX.format(wallet), timeout=10)
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        logging.error(f"Failed to fetch TXs for {wallet}: {e}")
-        return []
+        logging.warning(f"Primary API failed for {wallet}: {e}")
+        # fallback to JSON‑RPC
+        try:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "sui_getTransactions",
+                "params": [wallet, 5]
+            }
+            rpc = requests.post(FALLBACK_RPC, json=payload, timeout=10)
+            rpc.raise_for_status()
+            return rpc.json().get("result", [])
+        except Exception as e2:
+            logging.warning(f"Fallback RPC failed for {wallet}: {e2}")
+            return []
 
 def get_balance(wallet):
     try:
@@ -108,16 +121,16 @@ def get_balance(wallet):
         r.raise_for_status()
         data = r.json()
     except Exception as e:
-        logging.error(f"Failed to fetch balance for {wallet}: {e}")
+        logging.warning(f"Balance fetch failed for {wallet}: {e}")
         return "unknown"
-    sui = next((b["balance"] for b in data if b["type"] == "SUI"), 0)
-    toks = len([b for b in data if b["type"] != "SUI"])
+    sui = next((b["balance"] for b in data if b["type"]=="SUI"), 0)
+    toks = len([b for b in data if b["type"]!="SUI"])
     return f"{int(sui)/1e9:,.0f} SUI + {toks} tokens"
 
 def shorten(addr, n=6):
     return addr[:n] + "…" + addr[-n:]
 
-# ─── BACKGROUND MONITOR JOB ───────────────────────────────────────
+# ─── Background monitor job ───────────────────────────────────────
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     global last_seen
     bot = context.bot
@@ -132,14 +145,14 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         unseen = [tx for tx in reversed(txs) if tx["digest"] != last_seen.get(wallet)]
-        logging.info(f" → {len(unseen)} new tx(s) for {wallet}")
+        logging.info(f" → {len(unseen)} new tx(s)")
 
         for tx in unseen:
             ts   = datetime.datetime.fromtimestamp(tx["timestamp_ms"]/1000)
             when = ts.strftime("%Y-%m-%d %H:%M:%S")
-            addr = tx.get("object_id", "unknown")
-            sym  = tx.get("symbol", "unknown")
-            amt  = tx.get("amount", "")
+            addr = tx.get("object_id","unknown")
+            sym  = tx.get("symbol","unknown")
+            amt  = tx.get("amount","")
             bal  = get_balance(wallet)
             msg  = (
                 f"🐋 *Wallet Alert!*\n"
@@ -159,34 +172,32 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
 # ─── ENTRY POINT ─────────────────────────────────────────────────
 def main():
-    # Clear old webhook & pending updates
+    # clear old webhook & updates
     requests.post(
         f"https://api.telegram.org/bot{TOKEN}"
         f"/deleteWebhook?drop_pending_updates=true"
     )
-    # Set new webhook
+    # set new webhook
     endpoint = f"{WEBHOOK_URL}/{TOKEN}"
     requests.post(
         f"https://api.telegram.org/bot{TOKEN}"
         f"/setWebhook?url={endpoint}"
     )
 
-    # Logging
     logging.basicConfig(format="%(asctime)s %(levelname)s:%(message)s", level=logging.INFO)
 
-    # Build application
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Register handlers
+    # register handlers
     app.add_handler(CommandHandler("start",      start))
     app.add_handler(CommandHandler("track",      track_cmd))
     app.add_handler(CommandHandler("untrack",    untrack_cmd))
     app.add_handler(CommandHandler("listwallets", list_cmd))
 
-    # Schedule monitor job
+    # schedule monitor
     app.job_queue.run_repeating(monitor_job, interval=CHECK_INTERVAL, first=10)
 
-    # Run webhook server
+    # run webhook server (blocks)
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
