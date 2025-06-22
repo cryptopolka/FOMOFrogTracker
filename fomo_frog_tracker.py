@@ -6,18 +6,21 @@ from telegram.ext import ApplicationBuilder, CommandHandler
 
 # ── CONFIG ──────────────────────────────────────────────────
 TELE_TOKEN = os.getenv("TELE_TOKEN")
-CHAT_ID    = os.getenv("CHAT_ID")
 RSI_PERIOD = int(os.getenv("RSI_PERIOD", 14))
 OVERBOT    = int(os.getenv("RSI_OVERBOUGHT", 70))
 OVERSOLD   = int(os.getenv("RSI_OVERSOLD", 30))
 PAIR_IDS   = os.getenv("PAIR_IDS", "").split(",")
+
+# ── DYNAMIC CHAT STORAGE ────────────────────────────────────
+# Stores chat IDs of users/groups that started the bot
+RECIPIENTS = set()
 
 # ── OPTIONAL LEGIT CHECK STUB ───────────────────────────────
 def is_legit(pair_id):
     # TODO: implement your liquidity‑lock, age, holder, volume, audit checks
     return True
 
-# ── RSI CALC ─────────────────────────────────────────────────
+# ── RSI CALCULATION ─────────────────────────────────────────
 def compute_rsi(prices, period):
     deltas   = np.diff(prices)
     gains    = np.where(deltas > 0, deltas, 0)
@@ -29,18 +32,22 @@ def compute_rsi(prices, period):
 
 # ── /start COMMAND ──────────────────────────────────────────
 async def start(update, ctx):
+    chat_id = update.effective_chat.id
+    RECIPIENTS.add(chat_id)
     await update.message.reply_text(
-        "🐸 Welcome to *FOMO Frog Tracker*!  I scan your Sui tokens every 30 min\n"
-        "/help for commands.",
+        "🐸 Welcome to *FOMO Frog Tracker*! I scan your Sui tokens every 30 min.\n"
+        "You will receive periodic RSI alerts here.\n"
+        "Type /help for more info.",
         parse_mode="Markdown"
     )
 
 # ── /help COMMAND ───────────────────────────────────────────
 async def help_cmd(update, ctx):
     await update.message.reply_text(
-        "/start  – show welcome message\n"
-        "/help   – this menu\n"
-        "Bot scans automatically every 30 min; no other commands needed."
+        "Commands:\n"
+        "/start  – Register this chat for periodic RSI alerts\n"
+        "/help   – Show this help message\n"
+        "The bot scans automatically every 30 min; no further commands needed."
     )
 
 # ── SCAN JOB ─────────────────────────────────────────────────
@@ -80,7 +87,9 @@ async def scan_all(app, _):
         "_Note: FOMO Frog Tracker is for alerts only. DYOR—any trades are at your own risk._"
     )
 
-    await app.bot.send_message(CHAT_ID, report, parse_mode="Markdown")
+    # Send report to all registered chats
+    for chat_id in RECIPIENTS:
+        await app.bot.send_message(chat_id, report, parse_mode="Markdown")
 
 # ── MAIN ENTRYPOINT ─────────────────────────────────────────
 if __name__ == "__main__":
