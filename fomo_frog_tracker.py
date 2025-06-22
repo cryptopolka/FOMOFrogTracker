@@ -1,50 +1,41 @@
 # fomo_frog_tracker.py
 
 import os
+import re
 import json
 import datetime
 import logging
 import requests
 
-# ─── Silence verbose HTTP logs ───────────────────────────────────
+# ─── Silence noisy HTTP logs ────────────────────────────────────
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
 
-# ─── Patch JobQueue weakref bug ──────────────────────────────────
+# ─── Patch PTB JobQueue weakref bug ──────────────────────────────
 import telegram.ext._jobqueue as _jq
 def _patch_set_app(self, application):
     self._application = lambda: application
 _jq.JobQueue.set_application = _patch_set_app
 
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ─── CONFIG ──────────────────────────────────────────────────────
-TOKEN               = os.getenv("TOKEN")
-WEBHOOK_URL         = os.getenv("WEBHOOK_URL")
-PORT                = int(os.getenv("PORT", "80"))
-CHECK_INTERVAL      = 60
-
-BLOCKVISION_API_KEY = "2yrKC52obCEwlOti0AVSr1RMCcF"
+TOKEN          = os.getenv("TOKEN")
+WEBHOOK_URL    = os.getenv("WEBHOOK_URL")
+PORT           = int(os.getenv("PORT", "80"))
+CHECK_INTERVAL = 60  # seconds
 
 SPONSORED_MSG = (
     "\n\n📢 *Sponsored*: Check out $MetaWhale – now live on Moonbags! "
     "Join the chat: https://t.me/MetaWhaleOfficial"
 )
 
-TRACK_FILE   = "tracked_wallets.json"
-STATE_FILE   = "wallet_last_tx.json"
-
-BV_TX_URL    = "https://api.blockvision.org/v2/sui/account/activities"
-BV_COINS_URL = "https://api.blockvision.org/v2/sui/account/coins"
-RPC_URL      = "https://fullnode.mainnet.sui.io:443"
+TRACK_FILE = "tracked_wallets.json"
+STATE_FILE = "wallet_last_tx.json"
 # ──────────────────────────────────────────────────────────────────
 
-# ─── State persistence ────────────────────────────────────────────
+# ─── Persistence ──────────────────────────────────────────────────
 def load_json(path, default):
     return json.load(open(path)) if os.path.exists(path) else default
 
@@ -55,29 +46,29 @@ def save_json(path, data):
 tracked_wallets = load_json(TRACK_FILE, {})
 last_seen       = load_json(STATE_FILE, {})
 
-# ─── Telegram handlers ────────────────────────────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ─── Bot commands ─────────────────────────────────────────────────
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🐸 *Welcome to FOMO Frog Tracker!*\n\n"
         "• /track `<wallet>`\n"
         "• /untrack `<wallet>`\n"
         "• /listwallets\n\n"
-        "You’ll get private alerts when your tracked wallets transact.",
-        parse_mode="Markdown",
+        "Alerts fire whenever new on‐chain activity appears.",
+        parse_mode="Markdown"
     )
 
-async def track_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
+async def track_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
         return await update.message.reply_text("Usage: /track <wallet_address>")
-    w = context.args[0].lower()
+    w = ctx.args[0].lower()
     tracked_wallets[w] = update.effective_chat.id
     save_json(TRACK_FILE, tracked_wallets)
     await update.message.reply_text(f"✅ Now tracking `{w}`", parse_mode="Markdown")
 
-async def untrack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
+async def untrack_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
         return await update.message.reply_text("Usage: /untrack <wallet_address>")
-    w  = context.args[0].lower()
+    w = ctx.args[0].lower()
     uid = update.effective_chat.id
     if tracked_wallets.get(w) == uid:
         tracked_wallets.pop(w)
@@ -86,98 +77,58 @@ async def untrack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("That wallet isn’t in your list.")
 
-async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_chat.id
-    my  = [w for w,u in tracked_wallets.items() if u == uid]
-    if not my:
+    wallets = [w for w,u in tracked_wallets.items() if u == uid]
+    if not wallets:
         return await update.message.reply_text("No wallets being tracked.")
-    lines = "\n".join(f"- `{w}`" for w in my)
-    await update.message.reply_text(f"📋 *Your wallets:*\n{lines}", parse_mode="Markdown")
+    msg = "📋 *Your wallets:* \n" + "\n".join(f"- `{w}`" for w in wallets)
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
-# ─── On‑chain helpers w/ REST→RPC fallback ────────────────────────
+# ─── Scraper for Suivision Activity ──────────────────────────────
 def get_latest_txs(wallet):
-    headers = {"accept":"application/json","X-API-Key":BLOCKVISION_API_KEY}
-    # 1) Try BlockVision v2
-    data = []
+    url = f"https://suivision.xyz/account/{wallet}?tab=Activity"
     try:
-        r = requests.get(BV_TX_URL, headers=headers, params={"address":wallet,"limit":5}, timeout=10)
-        r.raise_for_status()
-        data = r.json().get("data", [])
+        html = requests.get(url, timeout=10).text
+        # extract the Next.js JSON blob
+        m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
+        if not m:
+            logging.warning(f"No JSON blob on Suivision page for {wallet}")
+            return []
+        blob = json.loads(m.group(1))
+        # drill into the props to find the activity list
+        page_props = blob.get("props", {}).get("pageProps", {})
+        # adjust these keys if Suivision’s structure changes:
+        acts = page_props.get("initialState", {}) \
+                         .get("account", {}) \
+                         .get("activity", {}) \
+                         .get("transactions", [])
     except Exception as e:
-        logging.warning(f"BlockVision v2 HTTP failed for {wallet}: {e}")
-
-    # If we got some items, map and return
-    if data:
-        return [
-            {
-                "digest":       it.get("digest",""),
-                "action":       it.get("type","TX"),
-                "timestamp_ms": it.get("timestampMs",0),
-                "object_id":    (it.get("interactAddresses") or [{}])[0].get("address",""),
-                "symbol":       (it.get("coinChanges") or [{}])[0].get("symbol",""),
-                "amount":       (it.get("coinChanges") or [{}])[0].get("amount",""),
-            }
-            for it in data
-        ]
-
-    # 2) Fallback to JSON‑RPC
-    try:
-        payload = {"jsonrpc":"2.0","id":1,"method":"sui_getTransactions","params":[wallet,5]}
-        rpc     = requests.post(RPC_URL,json=payload,timeout=10)
-        rpc.raise_for_status()
-        digs    = rpc.json().get("result",[])
-        now_ms  = int(datetime.datetime.utcnow().timestamp()*1000)
-        return [
-            {
-                "digest":       d,
-                "action":       "TX",
-                "timestamp_ms": now_ms,
-                "object_id":    "",
-                "symbol":       "",
-                "amount":       "",
-            }
-            for d in digs if isinstance(d,str)
-        ]
-    except Exception as e2:
-        logging.warning(f"RPC fallback failed for {wallet}: {e2}")
+        logging.warning(f"HTML scrape failed for {wallet}: {e}")
         return []
 
-def get_balance(wallet):
-    headers = {"accept":"application/json","X-API-Key":BLOCKVISION_API_KEY}
-    # 1) BlockVision v2 coins
-    try:
-        r = requests.get(BV_COINS_URL, headers=headers, params={"address":wallet}, timeout=10)
-        r.raise_for_status()
-        coins = r.json().get("data", [])
-        sui = next((c["balance"] for c in coins if c["symbol"]=="SUI"), 0)
-        return f"{int(sui)/1e9:,.0f} SUI + {len(coins)-1} tokens"
-    except Exception:
-        pass
-    # 2) RPC fallback
-    try:
-        payload = {"jsonrpc":"2.0","id":1,"method":"suix_getAllBalances","params":[wallet]}
-        rpc     = requests.post(RPC_URL,json=payload,timeout=10)
-        rpc.raise_for_status()
-        bal_list = rpc.json().get("result",[])
-        sui = 0
-        for b in bal_list:
-            if b.get("coinType","").endswith("::sui::SUI"):
-                sui = int(b.get("totalBalance",0))
-        return f"{sui/1e9:,.0f} SUI + {len(bal_list)-1} tokens"
-    except Exception as e:
-        logging.warning(f"Balance fallback failed for {wallet}: {e}")
-        return "unknown"
+    txs = []
+    for tx in acts:
+        txs.append({
+            "digest":       tx.get("digest", ""),
+            "action":       tx.get("type",   "TX"),
+            "timestamp_ms": tx.get("timestamp", 0),
+            "object_id":    tx.get("objectId", ""),
+            "symbol":       tx.get("coinSymbol", ""),
+            "amount":       tx.get("coinAmount", ""),
+        })
+    return txs
 
-def shorten(addr, n=6):
-    return addr[:n] + "…" + addr[-n:]
+def shorten(a, n=6): return a[:n] + "…" + a[-n:]
 
-# ─── Background monitor job ───────────────────────────────────────
-async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
+# ─── Monitor Job ─────────────────────────────────────────────────
+import datetime as dt
+async def monitor_job(ctx: ContextTypes.DEFAULT_TYPE):
     global last_seen
-    bot = context.bot
+    bot = ctx.bot
 
-    for wallet, chat_id in list(tracked_wallets.items()):
-        logging.info(f"Checking {wallet}, last_seen={last_seen.get(wallet)}")
+    for wallet, chat_id in tracked_wallets.items():
+        logging.info(f"Checking {wallet} (last_seen={last_seen.get(wallet)})")
         txs = get_latest_txs(wallet)
         if not txs:
             continue
@@ -186,19 +137,17 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
         if latest == last_seen.get(wallet):
             continue
 
-        unseen = [tx for tx in reversed(txs) if tx["digest"]!=last_seen.get(wallet)]
-        logging.info(f" → {len(unseen)} new tx(s) for {wallet}")
+        new = [tx for tx in reversed(txs) if tx["digest"] != last_seen.get(wallet)]
+        logging.info(f" → found {len(new)} new tx(s)")
 
-        for tx in unseen:
-            ts   = datetime.datetime.fromtimestamp(tx["timestamp_ms"]/1000)
+        for tx in new:
+            ts   = dt.datetime.fromtimestamp(tx["timestamp_ms"]/1000)
             when = ts.strftime("%Y-%m-%d %H:%M:%S")
-            bal  = get_balance(wallet)
-            msg  = (
+            msg = (
                 f"🐋 *Wallet Alert!*\n"
-                f"`{shorten(wallet)}` • *{tx.get('action','TX').upper()}*\n"
-                f"{tx.get('symbol')} • {tx.get('amount')}\n"
-                f"Contract `{tx.get('object_id')}`\n"
-                f"Balance: {bal}\n"
+                f"`{shorten(wallet)}` • *{tx['action'].upper()}*\n"
+                f"{tx['symbol']} • {tx['amount']}\n"
+                f"Contract `{tx['object_id']}`\n"
                 f"Time: {when}\n"
                 f"Tx: https://suivision.xyz/tx/{tx['digest']}"
                 f"{SPONSORED_MSG}"
@@ -209,11 +158,10 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
     save_json(STATE_FILE, last_seen)
 
-# ─── ENTRY POINT ─────────────────────────────────────────────────
+# ─── Entry Point ─────────────────────────────────────────────────
 def main():
-    # Clear old webhook + pending updates
+    # clear old webhook & pending updates
     requests.post(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true")
-    # Set new webhook
     endpoint = f"{WEBHOOK_URL}/{TOKEN}"
     requests.post(f"https://api.telegram.org/bot{TOKEN}/setWebhook?url={endpoint}")
 
@@ -226,7 +174,11 @@ def main():
     app.add_handler(CommandHandler("listwallets",list_cmd))
 
     app.job_queue.run_repeating(monitor_job, interval=CHECK_INTERVAL, first=10)
-    app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=endpoint)
+
+    app.run_webhook(
+        listen="0.0.0.0", port=PORT,
+        url_path=TOKEN, webhook_url=endpoint
+    )
 
 if __name__ == "__main__":
     main()
