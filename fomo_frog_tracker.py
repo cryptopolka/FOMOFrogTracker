@@ -36,7 +36,6 @@ def is_price_change_reasonable(pair, max_change_pct=100):
         return False
 
 # Combined legitimacy check
-# Placeholder for additional checks (holder distribution, audits)
 def is_legit(pair):
     return (
         is_liquidity_sufficient(pair)
@@ -46,12 +45,12 @@ def is_legit(pair):
 
 # ── RSI CALCULATION ─────────────────────────────────────────
 def compute_rsi(prices, period):
-    deltas = np.diff(prices)
-    gains  = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
-    avg_gain = np.convolve(gains,  np.ones(period)/period, mode='valid')
-    avg_loss = np.convolve(losses, np.ones(period)/period, mode='valid')
-    rs = avg_gain / (avg_loss + 1e-8)
+    deltas    = np.diff(prices)
+    gains     = np.where(deltas > 0, deltas, 0)
+    losses    = np.where(deltas < 0, -deltas, 0)
+    avg_gain  = np.convolve(gains,  np.ones(period)/period, mode='valid')
+    avg_loss  = np.convolve(losses, np.ones(period)/period, mode='valid')
+    rs        = avg_gain / (avg_loss + 1e-8)
     return 100 - (100 / (1 + rs))
 
 # ── BOT COMMANDS ───────────────────────────────────────────
@@ -60,7 +59,7 @@ async def start(update, context):
     RECIPIENTS.add(chat_id)
     await update.message.reply_text(
         "🐸 Welcome to *FOMO Frog Tracker*! I scan top Sui pairs every 30 min.\n"
-        "You will receive the top 5 overbought & oversold tokens by RSI after security checks.\n"
+        "You will receive top 5 overbought & oversold tokens by RSI after security checks.\n"
         "Type /help for more info.",
         parse_mode="Markdown"
     )
@@ -86,8 +85,7 @@ async def scan_job(context):
     for pair in data:
         if not is_legit(pair):
             continue
-        chart = pair.get("chart", [])
-        closes = [pt[1] for pt in chart]
+        closes = [pt[1] for pt in pair.get("chart", [])]
         if len(closes) < RSI_PERIOD:
             continue
         rsi = compute_rsi(np.array(closes), RSI_PERIOD)[-1]
@@ -98,7 +96,6 @@ async def scan_job(context):
             'rsi':       rsi
         })
 
-    # sort and slice
     sorted_by_rsi   = sorted(entries, key=lambda x: x['rsi'])
     oversold_list   = sorted_by_rsi[:5]
     overbought_list = sorted_by_rsi[-5:][::-1]
@@ -130,11 +127,13 @@ async def scan_job(context):
 
 # ── MAIN ENTRYPOINT ─────────────────────────────────────────
 if __name__ == "__main__":
+    # Build and register handlers
     app = ApplicationBuilder().token(TELE_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help",  help_cmd))
 
-    # Schedule the scan every 30 minutes, first run after 1 minute
+    # Schedule recurring scan: every 30m, first in 60s
     app.job_queue.run_repeating(scan_job, interval=1800, first=60)
 
+    # Start long-polling
     app.run_polling()
