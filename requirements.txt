@@ -1,4 +1,3 @@
-TELE_TOKEN=<your bot token>
-RSI_PERIOD=14
-RSI_OVERBOUGHT=70
-RSI_OVERSOLD=30
+python-telegram-bot
+numpy
+requests
