@@ -1,4 +1,4 @@
-python-telegram-bot
-apscheduler
-numpy
-requests
+TELE_TOKEN=<your bot token>
+RSI_PERIOD=14
+RSI_OVERBOUGHT=70
+RSI_OVERSOLD=30
