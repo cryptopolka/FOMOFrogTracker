@@ -47,9 +47,9 @@ def is_legit(pair):
 # ── RSI CALCULATION ─────────────────────────────────────────
 def compute_rsi(prices, period):
     deltas = np.diff(prices)
-    gains = np.where(deltas > 0, deltas, 0)
+    gains  = np.where(deltas > 0, deltas, 0)
     losses = np.where(deltas < 0, -deltas, 0)
-    avg_gain = np.convolve(gains, np.ones(period)/period, mode='valid')
+    avg_gain = np.convolve(gains,  np.ones(period)/period, mode='valid')
     avg_loss = np.convolve(losses, np.ones(period)/period, mode='valid')
     rs = avg_gain / (avg_loss + 1e-8)
     return 100 - (100 / (1 + rs))
@@ -60,7 +60,7 @@ async def start(update, context):
     RECIPIENTS.add(chat_id)
     await update.message.reply_text(
         "🐸 Welcome to *FOMO Frog Tracker*! I scan top Sui pairs every 30 min.\n"
-        "You will receive top 5 overbought & oversold tokens by RSI after security checks.\n"
+        "You will receive the top 5 overbought & oversold tokens by RSI after security checks.\n"
         "Type /help for more info.",
         parse_mode="Markdown"
     )
@@ -77,7 +77,9 @@ async def help_cmd(update, context):
 async def scan_job(context):
     entries = []
     try:
-        data = requests.get("https://api.dexscreener.com/latest/dex/pairs/sui").json().get("pairs", [])
+        data = requests.get(
+            "https://api.dexscreener.com/latest/dex/pairs/sui"
+        ).json().get("pairs", [])
     except:
         return
 
@@ -90,29 +92,38 @@ async def scan_job(context):
             continue
         rsi = compute_rsi(np.array(closes), RSI_PERIOD)[-1]
         entries.append({
-            'symbol': pair.get('symbol'),
-            'dex': pair.get('dexId'),
+            'symbol':    pair.get('symbol'),
+            'dex':       pair.get('dexId'),
             'liquidity': float(pair.get('liquidity', {}).get('usd', 0)),
-            'rsi': rsi
+            'rsi':       rsi
         })
 
     # sort and slice
-    sorted_by_rsi = sorted(entries, key=lambda x: x['rsi'])
-    oversold_list = sorted_by_rsi[:5]
+    sorted_by_rsi   = sorted(entries, key=lambda x: x['rsi'])
+    oversold_list   = sorted_by_rsi[:5]
     overbought_list = sorted_by_rsi[-5:][::-1]
 
     report = "🐸 *FOMO Frog Tracker — RSI Scan Results* (every 30 min)\n\n"
     if overbought_list:
         report += "⚠️ *Top 5 Overbought:*\n"
         for e in overbought_list:
-            report += f"{e['symbol']} on *{e['dex']}* (Liq ${e['liquidity']:,.0f}) — RSI {e['rsi']:.1f}\n"
+            report += (
+                f"{e['symbol']} on *{e['dex']}* "
+                f"(Liq ${e['liquidity']:,.0f}) — RSI {e['rsi']:.1f}\n"
+            )
         report += "\n"
     if oversold_list:
         report += "✅ *Top 5 Oversold:*\n"
         for e in oversold_list:
-            report += f"{e['symbol']} on *{e['dex']}* (Liq ${e['liquidity']:,.0f}) — RSI {e['rsi']:.1f}\n"
+            report += (
+                f"{e['symbol']} on *{e['dex']}* "
+                f"(Liq ${e['liquidity']:,.0f}) — RSI {e['rsi']:.1f}\n"
+            )
         report += "\n"
-    report += "_Note: FOMO Frog Tracker is for alerts only. DYOR—any trades are at your own risk._"
+    report += (
+        "_Note: FOMO Frog Tracker is for alerts only. "
+        "DYOR—any trades are at your own risk._"
+    )
 
     for chat_id in RECIPIENTS:
         await context.bot.send_message(chat_id, report, parse_mode="Markdown")
@@ -121,7 +132,7 @@ async def scan_job(context):
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELE_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("help",  help_cmd))
 
     # Schedule the scan every 30 minutes, first run after 1 minute
     app.job_queue.run_repeating(scan_job, interval=1800, first=60)
