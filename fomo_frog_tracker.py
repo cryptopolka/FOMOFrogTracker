@@ -88,33 +88,4 @@ async def score(update: ContextTypes.DEFAULT_TYPE, ctx: ContextTypes.DEFAULT_TYP
     pts = row[0] if row else 0
     await update.message.reply_text(f"🏅 You have *{pts}* FOMO points.", parse_mode="Markdown")
 
-# ── SCHEDULED JOBS ──────────────────────────────────────────
-def post_challenge(context: ContextTypes.DEFAULT_TYPE):
-    top = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
-    nxt = (top + timedelta(minutes=30)).strftime("%H:%M")
-    for chat_id in RECIPIENTS:
-        context.bot.send_message(
-            chat_id,
-            f"🕐 *Guess the SUI Price!*\n"
-            f"What will SUI/USD be at {nxt} UTC?\n"
-            "You have 15 min to `/guess <price>`.",
-            parse_mode="Markdown"
-        )
-        context.job_queue.run_once(list_guesses, when=15*60, context=(chat_id, top.timestamp()))
-        context.job_queue.run_once(reveal, when=30*60, context=(chat_id, top.timestamp()))
-
-async def list_guesses(context: ContextTypes.DEFAULT_TYPE):
-    chat_id, ts = context.job.context
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
-        "SELECT user_id,guess FROM guesses WHERE challenge_ts=?", (ts,)
-    ).fetchall()
-    if not rows:
-        msg = "No guesses submitted for this challenge."
-    else:
-        msg = "📋 *Current Guesses:*\n" + "\n".join(
-            f"- [user](tg://user?id={u}): ${g:.4f}" for u, g in rows
-        )
-    await context.bot.send_message(chat_id, msg, parse_mode="Markdown")
-
-async def reveal(context: ContextTypes.DEFAULT_TYPE):_
+# ── SCHEDULE
