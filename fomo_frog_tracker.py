@@ -55,9 +55,9 @@ async def start(update: ContextTypes.DEFAULT_TYPE, ctx: ContextTypes.DEFAULT_TYP
     RECIPIENTS.add(chat_id)
     init_db()
     await update.message.reply_text(
-        "🐸 *FOMO Frog Price Guess Bot*\n"
-        "I'll post an hourly SUI price challenge. Use /guess <price> to enter.\n"
-        "See /score for your total points.",
+        "🐸 *FOMO Frog Price‑Guess Bot*\n"
+        "Hourly SUI‑price challenge lives here. Use `/guess <price>` to enter.\n"
+        "Check `/score` for your total points.",
         parse_mode="Markdown"
     )
 
@@ -66,19 +66,19 @@ async def guess(update: ContextTypes.DEFAULT_TYPE, ctx: ContextTypes.DEFAULT_TYP
     try:
         price = float(ctx.args[0])
     except:
-        return await update.message.reply_text("Usage: /guess <price> (e.g. /guess 1.2345)")
+        return await update.message.reply_text("Usage: `/guess <price>` (e.g. `/guess 1.2345`)")
     now = int(time.time())
     top = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
     challenge_ts = int(top.timestamp())
     if now > challenge_ts + 15*60:
-        return await update.message.reply_text("Sorry, guessing is closed for this challenge.")
+        return await update.message.reply_text("⏰ Guessing closed for this challenge.")
     conn = init_db()
     conn.execute(
         "INSERT INTO guesses(challenge_ts,user_id,guess) VALUES(?,?,?)",
         (challenge_ts, user, price)
     )
     conn.commit()
-    await update.message.reply_text(f"Recorded your guess ${price:.4f} for {top.strftime('%H:%M')} UTC")
+    await update.message.reply_text(f"✅ Recorded ${price:.4f} for {top.strftime('%H:%M')} UTC challenge")
 
 async def score(update: ContextTypes.DEFAULT_TYPE, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.id
@@ -86,7 +86,7 @@ async def score(update: ContextTypes.DEFAULT_TYPE, ctx: ContextTypes.DEFAULT_TYP
     cur = conn.execute("SELECT points FROM scores WHERE user_id=?", (user,))
     row = cur.fetchone()
     pts = row[0] if row else 0
-    await update.message.reply_text(f"🏅 You have {pts} FOMO points.")
+    await update.message.reply_text(f"🏅 You have *{pts}* FOMO points.", parse_mode="Markdown")
 
 # ── SCHEDULED JOBS ──────────────────────────────────────────
 def post_challenge(context: ContextTypes.DEFAULT_TYPE):
@@ -100,7 +100,6 @@ def post_challenge(context: ContextTypes.DEFAULT_TYPE):
             "You have 15 min to `/guess <price>`.",
             parse_mode="Markdown"
         )
-        # schedule list & reveal
         context.job_queue.run_once(list_guesses, when=15*60, context=(chat_id, top.timestamp()))
         context.job_queue.run_once(reveal, when=30*60, context=(chat_id, top.timestamp()))
 
@@ -118,30 +117,4 @@ async def list_guesses(context: ContextTypes.DEFAULT_TYPE):
         )
     await context.bot.send_message(chat_id, msg, parse_mode="Markdown")
 
-async def reveal(context: ContextTypes.DEFAULT_TYPE):
-    chat_id, ts = context.job.context
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
-        "SELECT user_id,guess FROM guesses WHERE challenge_ts=?", (ts,)
-    ).fetchall()
-    actual = fetch_sui_price()
-    if not rows:
-        return await context.bot.send_message(chat_id, "No entries to reveal.")
-    winners = sorted(rows, key=lambda x: abs(x[1]-actual))[:5]
-    pts = [5,4,3,2,1]
-    msg = (f"🎯 *Reveal!* Actual SUI price: ${actual:.4f}\n\n"
-           "🏆 *Top 5 Winners:*\n")
-    for (u,g),p in zip(winners, pts):
-        msg += f"- [user](tg://user?id={u}) guessed ${g:.4f} → +{p} points\n"
-        award_points(u, p)
-    await context.bot.send_message(chat_id, msg, parse_mode="Markdown")
-
-# ── MAIN ─────────────────────────────────────────────────────
-if __name__ == "__main__":
-    init_db()
-    app = ApplicationBuilder().token(TELE_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("guess", guess))
-    app.add_handler(CommandHandler("score", score))
-    app.job_queue.run_repeating(post_challenge, interval=3600, first=0)
-    app.run_polling()
+async def reveal(context: ContextTypes.DEFAULT_TYPE):_
